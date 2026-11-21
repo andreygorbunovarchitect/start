@@ -1,0 +1,67 @@
+name: Build MyBypassDPI APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Compile ByeDPI and hev-socks5-tunnel (arm64-v8a)
+        run: |
+          set -e
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          NDK_DIR="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$(ls -d "$SDK_DIR"/ndk/* 2>/dev/null | sort -V | tail -n 1)}}"
+          echo "Using NDK: $NDK_DIR"
+
+          JNI_OUT="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$JNI_OUT"
+
+          # 1. Сборка ByeDPI (ciadpi) как исполняемого libciadpi.so
+          git clone --depth=1 https://github.com/hufrea/byedpi.git /tmp/byedpi
+          cd /tmp/byedpi
+          CC="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          make CC="$CC"
+          cp ciadpi "$JNI_OUT/libciadpi.so"
+
+          # 2. Сборка hev-socks5-tunnel (JNI-библиотека tun2socks)
+          git clone --recursive https://github.com/heiher/hev-socks5-tunnel.git /tmp/hev-socks5-tunnel
+          cd /tmp/hev-socks5-tunnel
+          "$NDK_DIR/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=Android.mk \
+            APP_ABI=arm64-v8a \
+            APP_PLATFORM=android-24 \
+            PKGNAME=hev/htproxy \
+            CLSNAME=TProxyService \
+            NDK_LIBS_OUT=/tmp/hev-libs \
+            NDK_OUT=/tmp/hev-obj
+          cp /tmp/hev-libs/arm64-v8a/libhev-socks5-tunnel.so "$JNI_OUT/"
+
+          ls -lh "$JNI_OUT"
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyBypassDPI-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
