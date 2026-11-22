@@ -2,6 +2,9 @@ package com.mybypass.app
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -12,28 +15,43 @@ import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.URL
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var toggleBtn: Button
+    private lateinit var dns1Input: EditText
+    private lateinit var dns2Input: EditText
+    private lateinit var ipv6Check: CheckBox
     private lateinit var argsInput: EditText
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
-    private val presets = listOf(
-        "Split + TLS" to "-s1 -r1+s -a1",
-        "OOB + Disorder" to "-o1 -d1 -r1+s -a1",
-        "Auto ТСПУ" to "-o1 -Ar -o1 -At -f-1 -r1+s -As -s1 -a1",
-        "Fake TTL 5" to "-f-1 -t5 -s1 -r1+s -a2"
+    private val dnsPresets = listOf(
+        Triple("Comss (ИИ+Google)", "83.220.169.155", "212.109.195.93"),
+        Triple("Резерв ИИ", "176.99.11.77", "80.78.247.254"),
+        Triple("Cloudflare (Обычный)", "1.1.1.1", "1.0.0.1")
+    )
+
+    // По умолчанию БЕЗ -a1, чтобы не ломать UDP-запросы к Smart DNS
+    private val dpiPresets = listOf(
+        "SmartDNS + ТСПУ" to "-o1 -Ar -o1 -At -f-1 -r1+s -As -s1",
+        "Split + TLS" to "-s1 -r1+s",
+        "OOB + Disorder" to "-o1 -d1 -r1+s",
+        "ТСПУ + UDP Fake" to "-o1 -Ar -o1 -At -f-1 -r1+s -As -s1 -a1"
     )
 
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -48,23 +66,31 @@ class MainActivity : AppCompatActivity() {
 
     private val notifPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* Работает даже при отказе, но уведомление удобнее видеть */ }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val prefs = getSharedPreferences("bypass_prefs", MODE_PRIVATE)
-        val savedArgs = prefs.getString("args", presets[2].second) ?: presets[2].second
+        val savedArgs = prefs.getString("args", dpiPresets[0].second) ?: dpiPresets[0].second
+        val savedDns1 = prefs.getString("dns1", dnsPresets[0].second) ?: dnsPresets[0].second
+        val savedDns2 = prefs.getString("dns2", dnsPresets[0].third) ?: dnsPresets[0].third
+        val savedBlockIpv6 = prefs.getBoolean("block_ipv6", true)
+
+        val outerScroll = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
+            isFillViewport = true
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#121212"))
-            setPadding(dp(16), dp(36), dp(16), dp(16))
+            setPadding(dp(16), dp(36), dp(16), dp(24))
         }
+        outerScroll.addView(root)
 
         val title = TextView(this).apply {
-            text = "MyBypassDPI"
-            textSize = 24f
+            text = "MyBypassDPI + Smart DNS"
+            textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
         }
@@ -72,7 +98,7 @@ class MainActivity : AppCompatActivity() {
 
         statusView = TextView(this).apply {
             textSize = 14f
-            setPadding(0, dp(4), 0, dp(16))
+            setPadding(0, dp(4), 0, dp(14))
         }
         root.addView(statusView)
 
@@ -80,12 +106,12 @@ class MainActivity : AppCompatActivity() {
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setPadding(dp(16), dp(14), dp(16), dp(14))
             setOnClickListener {
                 if (BypassVpnService.isRunning) {
                     stopVpnService()
                 } else {
-                    prefs.edit().putString("args", argsInput.text.toString()).apply()
+                    savePrefs()
                     requestVpnAndStart()
                 }
             }
@@ -95,67 +121,106 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        val presetsLabel = TextView(this).apply {
-            text = "Пресеты стратегий:"
+        // --- Блок Smart DNS ---
+        root.addView(sectionLabel("Smart DNS (для Gemini, Flow, Nano Banana, GPT):"))
+
+        val dnsScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val dnsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dnsPresets.forEach { (name, d1, d2) ->
+            dnsRow.addView(createChip(name) {
+                dns1Input.setText(d1)
+                dns2Input.setText(d2)
+                savePrefs()
+            })
+        }
+        dnsScroll.addView(dnsRow)
+        root.addView(dnsScroll)
+
+        val dnsInputsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        dns1Input = createInput(savedDns1, "Основной DNS")
+        dns2Input = createInput(savedDns2, "Запасной DNS")
+
+        dnsInputsRow.addView(dns1Input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(6)
+        })
+        dnsInputsRow.addView(dns2Input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(6)
+        })
+        root.addView(dnsInputsRow)
+
+        ipv6Check = CheckBox(this).apply {
+            text = "Блокировать утечки IPv6 (обязательно для Google / ИИ)"
+            isChecked = savedBlockIpv6
+            setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
-            setTextColor(Color.parseColor("#AAAAAA"))
-            setPadding(0, dp(18), 0, dp(6))
+            setPadding(0, dp(6), 0, dp(4))
+            setOnCheckedChangeListener { _, _ -> savePrefs() }
         }
-        root.addView(presetsLabel)
+        root.addView(ipv6Check)
 
-        val presetScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-        }
-        val presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        presets.forEach { (name, cmd) ->
-            val chip = Button(this).apply {
-                text = name
-                isAllCaps = false
-                textSize = 12f
-                setTextColor(Color.WHITE)
-                background = roundedBg("#262626", dp(8).toFloat())
-                setPadding(dp(12), dp(6), dp(12), dp(6))
-                setOnClickListener {
-                    argsInput.setText(cmd)
-                    prefs.edit().putString("args", cmd).apply()
-                }
-            }
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(8) }
-            presetRow.addView(chip, lp)
-        }
-        presetScroll.addView(presetRow)
-        root.addView(presetScroll)
+        // --- Блок ByeDPI ---
+        root.addView(sectionLabel("Стратегия обхода DPI (ciadpi):"))
 
-        val argsLabel = TextView(this).apply {
-            text = "Аргументы ByeDPI (ciadpi):"
+        val dpiScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val dpiRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dpiPresets.forEach { (name, cmd) ->
+            dpiRow.addView(createChip(name) {
+                argsInput.setText(cmd)
+                savePrefs()
+            })
+        }
+        dpiScroll.addView(dpiRow)
+        root.addView(dpiScroll)
+
+        argsInput = createInput(savedArgs, "-o1 -Ar -o1 -At -f-1 -r1+s -As -s1")
+        root.addView(argsInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) })
+
+        // --- Кнопки теста и копирования логов ---
+        val toolsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(14), 0, dp(8))
+        }
+
+        val testBtn = Button(this).apply {
+            text = "Тест ИИ / DNS"
+            isAllCaps = false
             textSize = 13f
-            setTextColor(Color.parseColor("#AAAAAA"))
-            setPadding(0, dp(14), 0, dp(6))
-        }
-        root.addView(argsLabel)
-
-        argsInput = EditText(this).apply {
-            setText(savedArgs)
             setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            hint = "-s1 -r1+s -a1"
-            typeface = Typeface.MONOSPACE
-            textSize = 13f
-            background = roundedBg("#1E1E1E", dp(8).toFloat())
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundedBg("#1565C0", dp(8).toFloat())
+            setOnClickListener { runAiCheck() }
         }
-        root.addView(argsInput)
 
-        val logLabel = TextView(this).apply {
-            text = "Лог работы:"
+        val copyBtn = Button(this).apply {
+            text = "Копировать лог"
+            isAllCaps = false
             textSize = 13f
-            setTextColor(Color.parseColor("#AAAAAA"))
-            setPadding(0, dp(16), 0, dp(6))
+            setTextColor(Color.WHITE)
+            background = roundedBg("#333333", dp(8).toFloat())
+            setOnClickListener {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("MyBypassDPI Log", BypassVpnService.getLogs()))
+                Toast.makeText(this@MainActivity, "Лог скопирован", Toast.LENGTH_SHORT).show()
+            }
         }
-        root.addView(logLabel)
+
+        toolsRow.addView(testBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(6) })
+        toolsRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(6) })
+        root.addView(toolsRow)
+
+        // --- Лог ---
+        val hintNote = TextView(this).apply {
+            text = "Важно: в настройках Android «Частный DNS» должен быть Откл. (или dns.comss.one)."
+            textSize = 11f
+            setTextColor(Color.parseColor("#FFB74D"))
+            setPadding(0, dp(2), 0, dp(8))
+        }
+        root.addView(hintNote)
 
         logView = TextView(this).apply {
             text = BypassVpnService.getLogs().ifEmpty { "Готово к запуску." }
@@ -171,11 +236,10 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(logScroll, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
-            0,
-            1f
+            dp(220)
         ))
 
-        setContentView(root)
+        setContentView(outerScroll)
         updateUi(BypassVpnService.isRunning)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -184,6 +248,43 @@ class MainActivity : AppCompatActivity() {
         ) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    private fun runAiCheck() {
+        BypassVpnService.log("--- Проверка доступности ИИ ---")
+        val targets = listOf(
+            "gemini.google.com",
+            "labs.google",
+            "chatgpt.com"
+        )
+        Thread {
+            for (host in targets) {
+                try {
+                    val ips = InetAddress.getAllByName(host).joinToString(",") { it.hostAddress ?: "?" }
+                    val conn = (URL("https://$host/").openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        instanceFollowRedirects = false
+                        requestMethod = "HEAD"
+                        setRequestProperty("User-Agent", "Mozilla/5.0")
+                    }
+                    val code = conn.responseCode
+                    conn.disconnect()
+                    BypassVpnService.log("OK $host -> HTTP $code (IP: $ips)")
+                } catch (e: Exception) {
+                    BypassVpnService.log("FAIL $host -> ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+        }.start()
+    }
+
+    private fun savePrefs() {
+        getSharedPreferences("bypass_prefs", MODE_PRIVATE).edit()
+            .putString("args", argsInput.text.toString())
+            .putString("dns1", dns1Input.text.toString().trim())
+            .putString("dns2", dns2Input.text.toString().trim())
+            .putBoolean("block_ipv6", ipv6Check.isChecked)
+            .apply()
     }
 
     override fun onStart() {
@@ -219,6 +320,9 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, BypassVpnService::class.java).apply {
             action = BypassVpnService.ACTION_START
             putExtra(BypassVpnService.EXTRA_ARGS, argsInput.text.toString())
+            putExtra(BypassVpnService.EXTRA_DNS1, dns1Input.text.toString().trim())
+            putExtra(BypassVpnService.EXTRA_DNS2, dns2Input.text.toString().trim())
+            putExtra(BypassVpnService.EXTRA_BLOCK_IPV6, ipv6Check.isChecked)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -236,26 +340,59 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUi(running: Boolean) {
         if (running) {
-            statusView.text = "● Подключено (локальный туннель)"
+            statusView.text = "● Подключено (ByeDPI + Smart DNS)"
             statusView.setTextColor(Color.parseColor("#4CAF50"))
             toggleBtn.text = "ОСТАНОВИТЬ"
             toggleBtn.background = roundedBg("#C62828", dp(12).toFloat())
-            argsInput.isEnabled = false
         } else {
             statusView.text = "○ Отключено"
             statusView.setTextColor(Color.parseColor("#9E9E9E"))
             toggleBtn.text = "ЗАПУСТИТЬ ОБХОД"
             toggleBtn.background = roundedBg("#2E7D32", dp(12).toFloat())
-            argsInput.isEnabled = true
         }
         toggleBtn.gravity = Gravity.CENTER
+        dns1Input.isEnabled = !running
+        dns2Input.isEnabled = !running
+        ipv6Check.isEnabled = !running
+        argsInput.isEnabled = !running
     }
 
-    private fun roundedBg(hex: String, radius: Float): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(Color.parseColor(hex))
-            cornerRadius = radius
-        }
+    private fun sectionLabel(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(Color.parseColor("#AAAAAA"))
+        setPadding(0, dp(14), 0, dp(6))
+    }
+
+    private fun createInput(initial: String, hintText: String): EditText = EditText(this).apply {
+        setText(initial)
+        hint = hintText
+        setTextColor(Color.WHITE)
+        setHintTextColor(Color.GRAY)
+        typeface = Typeface.MONOSPACE
+        textSize = 13f
+        isSingleLine = true
+        background = roundedBg("#1E1E1E", dp(8).toFloat())
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+    }
+
+    private fun createChip(label: String, onClick: () -> Unit): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 12f
+        setTextColor(Color.WHITE)
+        background = roundedBg("#262626", dp(8).toFloat())
+        setPadding(dp(12), dp(6), dp(12), dp(6))
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(8) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun roundedBg(hex: String, radius: Float): GradientDrawable = GradientDrawable().apply {
+        setColor(Color.parseColor(hex))
+        cornerRadius = radius
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
