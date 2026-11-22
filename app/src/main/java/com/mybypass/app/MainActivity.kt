@@ -46,7 +46,6 @@ class MainActivity : AppCompatActivity() {
         Triple("Cloudflare (Обычный)", "1.1.1.1", "1.0.0.1")
     )
 
-    // По умолчанию БЕЗ -a1, чтобы не ломать UDP-запросы к Smart DNS
     private val dpiPresets = listOf(
         "SmartDNS + ТСПУ" to "-o1 -Ar -o1 -At -f-1 -r1+s -As -s1",
         "Split + TLS" to "-s1 -r1+s",
@@ -70,6 +69,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BypassVpnService.initLogger(this)
 
         val prefs = getSharedPreferences("bypass_prefs", MODE_PRIVATE)
         val savedArgs = prefs.getString("args", dpiPresets[0].second) ?: dpiPresets[0].second
@@ -121,7 +121,6 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        // --- Блок Smart DNS ---
         root.addView(sectionLabel("Smart DNS (для Gemini, Flow, Nano Banana, GPT):"))
 
         val dnsScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
@@ -161,7 +160,6 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(ipv6Check)
 
-        // --- Блок ByeDPI ---
         root.addView(sectionLabel("Стратегия обхода DPI (ciadpi):"))
 
         val dpiScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
@@ -181,7 +179,6 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(8) })
 
-        // --- Кнопки теста и копирования логов ---
         val toolsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(14), 0, dp(8))
@@ -203,8 +200,9 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             background = roundedBg("#333333", dp(8).toFloat())
             setOnClickListener {
+                val report = BypassVpnService.getDiagnosticsReport(this@MainActivity)
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("MyBypassDPI Log", BypassVpnService.getLogs()))
+                cm.setPrimaryClip(ClipData.newPlainText("MyBypassDPI Log", report))
                 Toast.makeText(this@MainActivity, "Лог скопирован", Toast.LENGTH_SHORT).show()
             }
         }
@@ -213,7 +211,6 @@ class MainActivity : AppCompatActivity() {
         toolsRow.addView(copyBtn, LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(6) })
         root.addView(toolsRow)
 
-        // --- Лог ---
         val hintNote = TextView(this).apply {
             text = "Важно: в настройках Android «Частный DNS» должен быть Откл. (или dns.comss.one)."
             textSize = 11f
@@ -223,7 +220,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(hintNote)
 
         logView = TextView(this).apply {
-            text = BypassVpnService.getLogs().ifEmpty { "Готово к запуску." }
+            text = BypassVpnService.getDiagnosticsReport(this@MainActivity)
             setTextColor(Color.parseColor("#9CDCFE"))
             typeface = Typeface.MONOSPACE
             textSize = 11f
@@ -236,7 +233,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(logScroll, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(220)
+            dp(260)
         ))
 
         setContentView(outerScroll)
@@ -289,6 +286,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        logView.text = BypassVpnService.getDiagnosticsReport(this)
         BypassVpnService.onStateListener = { running ->
             runOnUiThread { updateUi(running) }
         }
