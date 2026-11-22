@@ -198,6 +198,21 @@ object VlessParser {
             put("loglevel", if (isTestMode) "error" else "warning")
         })
 
+        // Увеличенные таймауты, чтобы не обрывались звонки в Telegram и WhatsApp
+        if (!isTestMode) {
+            root.put("policy", JSONObject().apply {
+                put("levels", JSONObject().apply {
+                    put("0", JSONObject().apply {
+                        put("handshake", 4)
+                        put("connIdle", 300)
+                        put("uplinkOnly", 2)
+                        put("downlinkOnly", 5)
+                    })
+                })
+            })
+        }
+
+        // DoH по 443 порту через VLESS (работает даже когда сервер режет порт 53)
         if (!isTestMode) {
             val dnsServers = JSONArray()
 
@@ -217,8 +232,8 @@ object VlessParser {
                 })
             }
 
-            dnsServers.put("tcp://1.1.1.1")
-            dnsServers.put("tcp://8.8.8.8")
+            dnsServers.put("https://1.1.1.1/dns-query")
+            dnsServers.put("https://8.8.8.8/dns-query")
 
             root.put("dns", JSONObject().apply {
                 put("servers", dnsServers)
@@ -234,6 +249,7 @@ object VlessParser {
             put("settings", JSONObject().apply {
                 put("auth", "noauth")
                 put("udp", true)
+                put("ip", "127.0.0.1")
             })
             if (!isTestMode) {
                 put("sniffing", JSONObject().apply {
@@ -263,6 +279,7 @@ object VlessParser {
 
         val rules = JSONArray()
         if (!isTestMode) {
+            // Перехват DNS-запросов во встроенный DoH-резолвер Xray
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -270,12 +287,12 @@ object VlessParser {
                 put("outboundTag", "dns-out")
             })
 
+            // Блокируем строго протокол QUIC, не трогая UDP-звонки Telegram и WhatsApp
             if (blockQuic) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("inboundTag", JSONArray().put("socks-in"))
-                    put("network", "udp")
-                    put("port", "443")
+                    put("protocol", JSONArray().put("quic"))
                     put("outboundTag", "block")
                 })
             }
@@ -334,6 +351,10 @@ object VlessParser {
         val streamSettings = JSONObject().apply {
             put("network", node.network)
             put("security", node.security)
+            put("sockopt", JSONObject().apply {
+                put("tcpNoDelay", true)
+                put("tcpKeepAliveInterval", 30)
+            })
 
             when (node.security) {
                 "reality" -> {
