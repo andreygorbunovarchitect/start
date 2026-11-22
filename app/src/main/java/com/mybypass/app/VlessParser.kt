@@ -33,6 +33,11 @@ object VlessParser {
 
     private val SUPPORTED_NETWORKS = setOf("tcp", "raw", "ws", "grpc", "xhttp", "splithttp", "httpupgrade")
 
+    private val GEO_BLOCKED_FLAGS = listOf("🇷🇺", "🇧🇾", "🇨🇳", "🇭🇰", "🇮🇷", "🇰🇵")
+    private val GEO_BLOCKED_WORDS = Regex(
+        "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran)([^a-z]|$)"
+    )
+
     private val RU_DIRECT_DOMAINS = listOf(
         "domain:ru",
         "domain:su",
@@ -54,11 +59,16 @@ object VlessParser {
         "domain:vtb.ru"
     )
 
+    fun isGeoBlockedForAi(node: VlessNode): Boolean {
+        val label = node.name
+        if (GEO_BLOCKED_FLAGS.any { label.contains(it) }) return true
+        return GEO_BLOCKED_WORDS.containsMatchIn(label)
+    }
+
     fun parseSubscription(rawText: String): List<VlessNode> {
         var text = rawText.trim()
         if (text.isEmpty()) return emptyList()
 
-        // Если подписка закодирована в Base64 — декодируем
         if (!text.contains("vless://", ignoreCase = true)) {
             val cleaned = text.replace("\\s".toRegex(), "")
             val decoded = try {
@@ -188,11 +198,9 @@ object VlessParser {
             put("loglevel", if (isTestMode) "error" else "warning")
         })
 
-        // Встроенный DNS Xray (защищает от подмены провайдером и даёт зарубежный GeoDNS для ИИ)
         if (!isTestMode) {
             val dnsServers = JSONArray()
 
-            // Если адрес самого VLESS-сервера задан доменом — резолвим его локально, чтобы избежать петли
             if (!isIpAddress(node.host)) {
                 dnsServers.put(JSONObject().apply {
                     put("address", "localhost")
@@ -207,7 +215,6 @@ object VlessParser {
                 })
             }
 
-            // Основные DNS-запросы идут по TCP через VLESS (работает даже без UDP на сервере)
             dnsServers.put("tcp://1.1.1.1")
             dnsServers.put("tcp://8.8.8.8")
 
@@ -217,7 +224,6 @@ object VlessParser {
             })
         }
 
-        // Локальный SOCKS5 вход (сюда шлёт трафик hev-socks5-tunnel)
         val inbound = JSONObject().apply {
             put("tag", "socks-in")
             put("listen", "127.0.0.1")
@@ -237,7 +243,6 @@ object VlessParser {
         }
         root.put("inbounds", JSONArray().put(inbound))
 
-        // Исходящие: первым обязательно идёт proxy (дефолт для всего трафика и TCP DNS)
         val outbounds = JSONArray()
         outbounds.put(buildVlessOutbound(node))
         outbounds.put(JSONObject().apply {
@@ -254,10 +259,8 @@ object VlessParser {
         })
         root.put("outbounds", outbounds)
 
-        // Маршрутизация (Split Routing)
         val rules = JSONArray()
         if (!isTestMode) {
-            // 1. Перехват всех DNS-запросов (UDP/TCP 53) во встроенный DNS Xray
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -265,7 +268,6 @@ object VlessParser {
                 put("outboundTag", "dns-out")
             })
 
-            // 2. Блокировка QUIC (UDP 443) -> YouTube и Chrome сразу идут по стабильному TCP
             if (blockQuic) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
@@ -276,7 +278,6 @@ object VlessParser {
                 })
             }
 
-            // 3. Локальные сети напрямую
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().apply {
@@ -288,7 +289,6 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
-            // 4. Российские сайты, банки и Госуслуги напрямую
             if (splitRu) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
@@ -298,7 +298,6 @@ object VlessParser {
             }
         }
 
-        // 5. Всё остальное (включая Gemini, Flow, Nano Banana, ChatGPT, YouTube, TG, WA) -> VLESS
         rules.put(JSONObject().apply {
             put("type", "field")
             put("network", "tcp,udp")
@@ -380,10 +379,9 @@ object VlessParser {
                 "ws" -> {
                     put("wsSettings", JSONObject().apply {
                         put("path", node.path)
+                        // Актуальный формат Xray 26.x без deprecated headers.Host
                         if (node.headerHost.isNotBlank()) {
-                            put("headers", JSONObject().apply {
-                                put("Host", node.headerHost)
-                            })
+                            put("host", node.headerHost)
                         }
                     })
                 }
