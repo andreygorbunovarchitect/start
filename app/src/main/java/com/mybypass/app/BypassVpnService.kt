@@ -16,9 +16,11 @@ import java.io.InputStreamReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 
 class BypassVpnService : VpnService() {
 
+    private val executor = Executors.newSingleThreadExecutor()
     private var tunInterface: ParcelFileDescriptor? = null
     private var dpiProcess: Process? = null
     private var tproxyStarted = false
@@ -27,18 +29,28 @@ class BypassVpnService : VpnService() {
         when (intent?.action) {
             ACTION_START -> {
                 val rawArgs = intent.getStringExtra(EXTRA_ARGS).orEmpty()
-                startTunnel(rawArgs)
+                val dns1 = intent.getStringExtra(EXTRA_DNS1).orEmpty().trim()
+                val dns2 = intent.getStringExtra(EXTRA_DNS2).orEmpty().trim()
+                val blockIpv6 = intent.getBooleanExtra(EXTRA_BLOCK_IPV6, true)
+
+                startForegroundNotification(dns1.ifEmpty { DEFAULT_DNS1 })
+                executor.execute {
+                    startTunnel(rawArgs, dns1, dns2, blockIpv6)
+                }
             }
-            ACTION_STOP -> stopTunnel()
+            ACTION_STOP -> {
+                executor.execute {
+                    stopTunnel()
+                }
+            }
         }
         return START_STICKY
     }
 
-    private fun startTunnel(rawArgs: String) {
+    private fun startTunnel(rawArgs: String, dns1: String, dns2: String, blockIpv6: Boolean) {
         if (isRunning) return
 
-        startForegroundNotification()
-        log("Запуск локального прокси ByeDPI...")
+        log("Запуск ByeDPI + Smart DNS...")
 
         val binFile = File(applicationInfo.nativeLibraryDir, "libciadpi.so")
         if (!binFile.exists()) {
@@ -57,32 +69,35 @@ class BypassVpnService : VpnService() {
         log("Команда: ciadpi ${userArgs.joinToString(" ")}")
 
         try {
-            dpiProcess = ProcessBuilder(command)
+            val proc = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
+            dpiProcess = proc
 
-            // Обязательно читаем поток вывода, чтобы буфер процесса не переполнился
             Thread {
                 try {
-                    BufferedReader(InputStreamReader(dpiProcess!!.inputStream)).use { reader ->
+                    BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                         var line: String?
                         while (reader.readLine().also { line = it } != null) {
                             log("[ciadpi] $line")
                         }
                     }
+                    val exitCode = proc.waitFor()
+                    if (isRunning) {
+                        log("ВНИМАНИЕ: ciadpi неожиданно завершился (код $exitCode)")
+                    }
                 } catch (_: Exception) {
                 }
             }.apply { isDaemon = true }.start()
 
-            Thread.sleep(250)
-            if (dpiProcess?.isAlive != true) {
-                val code = dpiProcess?.exitValue()
-                log("ОШИБКА: ciadpi завершился сразу (код $code). Проверьте аргументы.")
+            Thread.sleep(300)
+            if (!proc.isAlive) {
+                log("ОШИБКА: ciadpi закрылся при старте (код ${proc.exitValue()}). Проверьте флаги.")
                 stopTunnel()
                 return
             }
-        } catch (e: Exception) {
-            log("ОШИБКА запуска ciadpi: ${e.message}")
+        } catch (e: Throwable) {
+            log("ОШИБКА запуска ciadpi: ${e.javaClass.simpleName}: ${e.message}")
             stopTunnel()
             return
         }
@@ -92,17 +107,47 @@ class BypassVpnService : VpnService() {
             .setMtu(8500)
             .addAddress("10.10.10.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
-            .addDnsServer("8.8.8.8")
+
+        // Захватываем IPv6 в туннель без IPv6-выхода -> приложения Google падают в IPv4 Smart DNS
+        if (blockIpv6) {
+            try {
+                builder.addAddress("fd00:10:10::2", 128)
+                builder.addRoute("::", 0)
+                log("IPv6 leak-block: ВКЛ")
+            } catch (e: Exception) {
+                log("Предупреждение IPv6: ${e.message}")
+            }
+        }
+
+        val primaryDns = dns1.ifEmpty { DEFAULT_DNS1 }
+        var dnsAdded = false
+        for (dns in listOf(primaryDns, dns2).filter { it.isNotEmpty() }.distinct()) {
+            try {
+                builder.addDnsServer(dns)
+                dnsAdded = true
+                log("Smart DNS: $dns")
+            } catch (e: Exception) {
+                log("Некорректный DNS '$dns': ${e.message}")
+            }
+        }
+        if (!dnsAdded) {
+            builder.addDnsServer(DEFAULT_DNS1)
+            log("Smart DNS (fallback): $DEFAULT_DNS1")
+        }
 
         try {
-            // Исключаем себя из VPN, чтобы избежать петли трафика
             builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
             log("Предупреждение addDisallowedApplication: ${e.message}")
         }
 
-        tunInterface = builder.establish()
+        tunInterface = try {
+            builder.establish()
+        } catch (e: Throwable) {
+            log("ОШИБКА builder.establish(): ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+
         if (tunInterface == null) {
             log("ОШИБКА: система не выдала TUN-интерфейс")
             stopTunnel()
@@ -114,12 +159,13 @@ class BypassVpnService : VpnService() {
             """
             tunnel:
               mtu: 8500
+              ipv4: 10.10.10.2
             socks5:
               port: 1080
               address: 127.0.0.1
               udp: 'udp'
             misc:
-              task-stack-size: 81920
+              task-stack-size: 86016
               connect-timeout: 5000
               read-write-timeout: 60000
               log-level: warn
@@ -131,9 +177,9 @@ class BypassVpnService : VpnService() {
             tproxyStarted = true
             isRunning = true
             notifyState()
-            log("Туннель активен (127.0.0.1:1080 -> TUN).")
+            log("Туннель активен! (TUN fd=${tunInterface!!.fd} -> 127.0.0.1:1080)")
         } catch (e: Throwable) {
-            log("ОШИБКА hev-socks5-tunnel: ${e.message}")
+            log("ОШИБКА hev-socks5-tunnel: ${e.javaClass.simpleName}: ${e.message}")
             stopTunnel()
         }
     }
@@ -142,7 +188,8 @@ class BypassVpnService : VpnService() {
         if (tproxyStarted) {
             try {
                 TProxyService.TProxyStopService()
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                log("Ошибка остановки TProxy: ${e.message}")
             }
             tproxyStarted = false
         }
@@ -167,7 +214,7 @@ class BypassVpnService : VpnService() {
         stopSelf()
     }
 
-    private fun startForegroundNotification() {
+    private fun startForegroundNotification(activeDns: String) {
         val channelId = "mybypass_vpn_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -194,7 +241,7 @@ class BypassVpnService : VpnService() {
 
         val notification = notificationBuilder
             .setContentTitle("MyBypassDPI активен")
-            .setContentText("Локальный обход DPI работает")
+            .setContentText("Smart DNS: $activeDns")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(openIntent)
             .setOngoing(true)
@@ -208,15 +255,18 @@ class BypassVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        log("VPN отозван системой.")
-        stopTunnel()
+        log("VPN отозван системой (возможно, активен другой VPN).")
+        executor.execute { stopTunnel() }
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        if (isRunning || tunInterface != null || dpiProcess != null) {
-            stopTunnel()
+        executor.execute {
+            if (isRunning || tunInterface != null || dpiProcess != null) {
+                stopTunnel()
+            }
         }
+        executor.shutdown()
         super.onDestroy()
     }
 
@@ -224,6 +274,10 @@ class BypassVpnService : VpnService() {
         const val ACTION_START = "com.mybypass.app.START"
         const val ACTION_STOP = "com.mybypass.app.STOP"
         const val EXTRA_ARGS = "extra_args"
+        const val EXTRA_DNS1 = "extra_dns1"
+        const val EXTRA_DNS2 = "extra_dns2"
+        const val EXTRA_BLOCK_IPV6 = "extra_block_ipv6"
+        const val DEFAULT_DNS1 = "83.220.169.155"
 
         @Volatile
         var isRunning: Boolean = false
@@ -241,7 +295,7 @@ class BypassVpnService : VpnService() {
             val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
             val entry = "[$time] $msg"
             logLines.addLast(entry)
-            while (logLines.size > 80) logLines.removeFirst()
+            while (logLines.size > 100) logLines.removeFirst()
             onLogListener?.invoke(getLogs())
         }
 
