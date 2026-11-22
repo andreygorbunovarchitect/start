@@ -205,6 +205,7 @@ object VlessParser {
                 dnsServers.put(JSONObject().apply {
                     put("address", "localhost")
                     put("domains", JSONArray().put("full:${node.host}"))
+                    put("skipFallback", true)
                 })
             }
 
@@ -212,6 +213,7 @@ object VlessParser {
                 dnsServers.put(JSONObject().apply {
                     put("address", "localhost")
                     put("domains", JSONArray(RU_DIRECT_DOMAINS))
+                    put("skipFallback", true)
                 })
             }
 
@@ -237,7 +239,7 @@ object VlessParser {
                 put("sniffing", JSONObject().apply {
                     put("enabled", true)
                     put("destOverride", JSONArray().put("http").put("tls").put("quic"))
-                    put("routeOnly", true)
+                    put("routeOnly", false)
                 })
             }
         }
@@ -379,7 +381,6 @@ object VlessParser {
                 "ws" -> {
                     put("wsSettings", JSONObject().apply {
                         put("path", node.path)
-                        // Актуальный формат Xray 26.x без deprecated headers.Host
                         if (node.headerHost.isNotBlank()) {
                             put("host", node.headerHost)
                         }
