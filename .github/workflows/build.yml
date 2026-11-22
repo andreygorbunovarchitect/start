@@ -24,7 +24,7 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Compile ByeDPI and hev-socks5-tunnel (arm64-v8a)
+      - name: Compile ByeDPI, hev-socks5-tunnel and sync JNI signatures
         run: |
           set -e
           SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
@@ -44,9 +44,6 @@ jobs:
           # 2. Сборка hev-socks5-tunnel (JNI tun2socks) с 16KB выравниванием
           git clone --recursive https://github.com/heiher/hev-socks5-tunnel.git /tmp/hev-socks5-tunnel
           cd /tmp/hev-socks5-tunnel
-          echo "--- Checking hev-jni.c native_methods ---"
-          grep -n -A 10 "native_methods" src/hev-jni.c || true
-
           "$NDK_DIR/ndk-build" \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=Android.mk \
@@ -58,6 +55,70 @@ jobs:
             NDK_LIBS_OUT=/tmp/hev-libs \
             NDK_OUT=/tmp/hev-obj
           cp /tmp/hev-libs/arm64-v8a/libhev-socks5-tunnel.so "$JNI_OUT/"
+
+          # 3. Автогенерация TProxyService.java строго по сигнатурам из src/hev-jni.c
+          python3 - "$GITHUB_WORKSPACE/app/src/main/java/hev/htproxy/TProxyService.java" <<'PYEOF'
+          import re, sys
+
+          with open("/tmp/hev-socks5-tunnel/src/hev-jni.c", "r", encoding="utf-8") as f:
+              src = f.read()
+
+          src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+          src = re.sub(r'//.*', '', src)
+
+          m = re.search(r'JNINativeMethod\s+\w+\s*\[\s*\]\s*=\s*\{(.*?)\};', src, re.S)
+          assert m, "JNINativeMethod not found in src/hev-jni.c"
+
+          pairs = re.findall(r'"([^"]+)"\s*,\s*"(\([^)]*\)[^"]+)"', m.group(1))
+          assert pairs, "No native methods found in src/hev-jni.c"
+
+          prim = {
+              'V': 'void', 'Z': 'boolean', 'B': 'byte', 'C': 'char',
+              'S': 'short', 'I': 'int', 'J': 'long', 'F': 'float', 'D': 'double'
+          }
+
+          def parse_type(sig, idx):
+              arr = ""
+              while idx < len(sig) and sig[idx] == '[':
+                  arr += "[]"
+                  idx += 1
+              c = sig[idx]
+              if c in prim:
+                  return prim[c] + arr, idx + 1
+              if c == 'L':
+                  end = sig.index(';', idx)
+                  return sig[idx + 1:end].replace('/', '.') + arr, end + 1
+              raise ValueError("Unknown JNI type: " + sig[idx:])
+
+          lines = [
+              "package hev.htproxy;",
+              "",
+              "public final class TProxyService {",
+              "    static {",
+              '        System.loadLibrary("hev-socks5-tunnel");',
+              "    }",
+              ""
+          ]
+
+          for name, sig in pairs:
+              idx = 1
+              params = []
+              p_i = 0
+              while sig[idx] != ')':
+                  t, idx = parse_type(sig, idx)
+                  params.append(f"{t} p{p_i}")
+                  p_i += 1
+              ret, _ = parse_type(sig, idx + 1)
+              lines.append(f"    public static native {ret} {name}({', '.join(params)});")
+
+          lines.append("}")
+          code = "\n".join(lines) + "\n"
+          print("--- Generated TProxyService.java ---")
+          print(code)
+
+          with open(sys.argv[1], "w", encoding="utf-8") as f:
+              f.write(code)
+          PYEOF
 
           ls -lh "$JNI_OUT"
 
