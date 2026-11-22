@@ -26,17 +26,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import java.io.File
-import java.net.HttpURLConnection
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.net.Socket
-import java.net.URL
-import java.util.Collections
-import java.util.concurrent.Callable
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
 
@@ -53,33 +42,30 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
 
-    private val isSearching = AtomicBoolean(false)
-    private var workingNodes: MutableList<Pair<VlessNode, Long>> = mutableListOf()
-    private var currentIndex: Int = 0
-    private var selectedNode: VlessNode? = null
-
-    private val allFreeUrls = listOf(
-        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
-        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
-        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
-        "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/githubmirror/clean/vless.txt",
-        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
-    )
+    private var workingNodes: MutableList<TestedNode> = mutableListOf()
+    private var selectedTested: TestedNode? = null
+    private var pendingServiceAction: String? = null
 
     private val subPresets = listOf(
-        "ВСЕ сразу (5 баз)" to allFreeUrls.joinToString("\n"),
-        "Igareck Полная" to allFreeUrls[0],
-        "Igareck Мобильная" to allFreeUrls[1],
-        "Reality Белые списки" to allFreeUrls[2],
-        "Kort0881 (1000+)" to allFreeUrls[3],
-        "Patterniha Топ" to allFreeUrls[4]
+        "ВСЕ сразу (5 баз)" to ServerScanner.ALL_FREE_URLS.joinToString("\n"),
+        "Igareck Полная" to ServerScanner.ALL_FREE_URLS[0],
+        "Igareck Мобильная" to ServerScanner.ALL_FREE_URLS[1],
+        "Reality Белые списки" to ServerScanner.ALL_FREE_URLS[2],
+        "Kort0881 (1000+)" to ServerScanner.ALL_FREE_URLS[3],
+        "Patterniha Топ" to ServerScanner.ALL_FREE_URLS[4]
     )
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val action = pendingServiceAction
+        pendingServiceAction = null
         if (result.resultCode == Activity.RESULT_OK) {
-            startVpnService()
+            when (action) {
+                BypassVpnService.ACTION_AUTO_CONNECT,
+                BypassVpnService.ACTION_RESCAN_AND_CONNECT -> sendServiceAction(action)
+                else -> startSelectedVpn()
+            }
         } else {
             BypassVpnService.log("Пользователь отклонил разрешение на VPN.")
         }
@@ -93,23 +79,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         BypassVpnService.initLogger(this)
 
-        val prefs = getSharedPreferences("xray_prefs", MODE_PRIVATE)
-        val savedSub = prefs.getString("sub_url", subPresets[0].second) ?: subPresets[0].second
-        val savedVless = prefs.getString("selected_vless", "").orEmpty()
-        val savedAiFilter = prefs.getBoolean("ai_country_filter", true)
-        val savedSplitRu = prefs.getBoolean("split_ru", true)
-        val savedBlockQuic = prefs.getBoolean("block_quic", true)
-        val savedBlockIpv6 = prefs.getBoolean("block_ipv6", true)
-
-        loadSavedWorkingList(prefs)
-        if (savedVless.isNotBlank()) {
-            selectedNode = VlessParser.parseVlessUri(savedVless)
-            val idx = workingNodes.indexOfFirst { it.first.rawUri == savedVless }
-            if (idx >= 0) currentIndex = idx
-        } else if (workingNodes.isNotEmpty()) {
-            selectedNode = workingNodes[0].first
-            currentIndex = 0
-        }
+        workingNodes = ServerScanner.loadWorkingList(this)
+        selectedTested = ServerScanner.loadSelectedNode(this)
 
         val outerScroll = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#121212"))
@@ -154,7 +125,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(dp(16), dp(14), dp(16), dp(14))
             setOnClickListener {
-                if (BypassVpnService.isRunning) {
+                if (BypassVpnService.isRunning || BypassVpnService.isAutoSearching) {
                     stopVpnService()
                 } else {
                     savePrefs()
@@ -162,15 +133,18 @@ class MainActivity : AppCompatActivity() {
                     if (input.startsWith("vless://", ignoreCase = true) && !input.contains('\n')) {
                         val parsed = VlessParser.parseVlessUri(input)
                         if (parsed != null) {
-                            setSelectedNode(parsed, -1)
-                            requestVpnAndStart()
+                            val manual = TestedNode(node = parsed, pingMs = -1L)
+                            selectedTested = manual
+                            ServerScanner.saveSelectedNode(this@MainActivity, manual)
+                            refreshSelectedLabel()
+                            requestVpnAndRun(BypassVpnService.ACTION_START)
                         } else {
                             Toast.makeText(this@MainActivity, "Неверный формат ссылки vless://", Toast.LENGTH_SHORT).show()
                         }
-                    } else if (selectedNode != null) {
-                        requestVpnAndStart()
+                    } else if (selectedTested != null) {
+                        requestVpnAndRun(BypassVpnService.ACTION_START)
                     } else {
-                        findAndSelectBestServers(autoStart = true)
+                        requestVpnAndRun(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
                     }
                 }
             }
@@ -194,8 +168,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(subScroll)
 
         subInput = EditText(this).apply {
-            setText(savedSub)
-            hint = "Одна или несколько ссылок https://... (по строке) или vless://..."
+            setText(ServerScanner.getSavedSubText(this@MainActivity))
+            hint = "Одна или несколько ссылок https://... или vless://..."
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
             typeface = Typeface.MONOSPACE
@@ -215,14 +189,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         findBtn = Button(this).apply {
-            text = "Найти серверы (до 25)"
+            text = "Автопоиск + Подкл."
             isAllCaps = false
             textSize = 13f
             setTextColor(Color.WHITE)
             background = roundedBg("#1565C0", dp(8).toFloat())
             setOnClickListener {
                 savePrefs()
-                findAndSelectBestServers(autoStart = false)
+                requestVpnAndRun(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
             }
         }
 
@@ -240,7 +214,7 @@ class MainActivity : AppCompatActivity() {
 
         aiCountryCheck = CheckBox(this).apply {
             text = "Фильтр под ИИ: исключить РФ, РБ, Китай и Гонконг"
-            isChecked = savedAiFilter
+            isChecked = ServerScanner.isAiFilterEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
             setOnCheckedChangeListener { _, _ -> savePrefs() }
@@ -249,7 +223,7 @@ class MainActivity : AppCompatActivity() {
 
         splitRuCheck = CheckBox(this).apply {
             text = "Split Routing: РФ (.ru), банки и Госуслуги напрямую"
-            isChecked = savedSplitRu
+            isChecked = ServerScanner.isSplitRuEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
             setOnCheckedChangeListener { _, _ -> savePrefs() }
@@ -257,8 +231,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(splitRuCheck)
 
         blockQuicCheck = CheckBox(this).apply {
-            text = "Блокировать QUIC (UDP 443) — стабильный YouTube"
-            isChecked = savedBlockQuic
+            text = "Блокировать QUIC — стабильные YouTube, Meta и звонки"
+            isChecked = ServerScanner.isBlockQuicEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
             setOnCheckedChangeListener { _, _ -> savePrefs() }
@@ -266,8 +240,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(blockQuicCheck)
 
         blockIpv6Check = CheckBox(this).apply {
-            text = "Блокировать утечки IPv6 (для Gemini / ИИ)"
-            isChecked = savedBlockIpv6
+            text = "Блокировать утечки IPv6 (включать только на мобильной сети)"
+            isChecked = ServerScanner.isBlockIpv6Enabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
             setOnCheckedChangeListener { _, _ -> savePrefs() }
@@ -319,9 +293,8 @@ class MainActivity : AppCompatActivity() {
         ))
 
         setContentView(outerScroll)
-        val initialPing = workingNodes.getOrNull(currentIndex)?.second ?: -1L
-        refreshSelectedLabel(initialPing)
-        updateUi(BypassVpnService.isRunning)
+        refreshSelectedLabel()
+        updateUi()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -329,342 +302,67 @@ class MainActivity : AppCompatActivity() {
         ) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+
+        handleTileAutoAction(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleTileAutoAction(intent)
+    }
+
+    private fun handleTileAutoAction(intent: Intent?) {
+        val autoAction = intent?.getStringExtra(EXTRA_AUTO_ACTION) ?: return
+        intent.removeExtra(EXTRA_AUTO_ACTION)
+        requestVpnAndRun(autoAction)
     }
 
     private fun showServerPickerDialog() {
+        workingNodes = ServerScanner.loadWorkingList(this)
         if (workingNodes.isEmpty()) {
-            Toast.makeText(this, "Список пуст. Нажмите «Найти серверы (до 25)»", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Список пуст. Нажмите «Автопоиск + Подкл.»", Toast.LENGTH_SHORT).show()
             return
         }
-        val items = workingNodes.mapIndexed { idx, (node, ping) ->
-            val mark = if (node.rawUri == selectedNode?.rawUri) "▶ " else ""
-            "$mark#${idx + 1} • ${ping}мс • ${node.name.take(32)} (${node.security}/${node.network})"
+        val items = workingNodes.mapIndexed { idx, tested ->
+            tested.listItemLabel(idx, tested.node.rawUri == selectedTested?.node?.rawUri)
         }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Рабочие серверы (${workingNodes.size})")
+            .setTitle("Серверы (${workingNodes.size}) — сначала ВСЕ сервисы")
             .setItems(items) { _, which ->
-                currentIndex = which
                 val chosen = workingNodes[which]
-                setSelectedNode(chosen.first, chosen.second)
-                BypassVpnService.log("Выбран сервер #${which + 1}: ${chosen.first.name} (${chosen.second} мс)")
-                if (BypassVpnService.isRunning) {
-                    stopVpnService()
-                    logScroll.postDelayed({ requestVpnAndStart() }, 600)
-                }
+                selectedTested = chosen
+                ServerScanner.saveSelectedNode(this, chosen)
+                refreshSelectedLabel()
+                BypassVpnService.log("Выбран сервер #${which + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+                requestVpnAndRun(BypassVpnService.ACTION_START)
             }
             .setNegativeButton("Закрыть", null)
             .show()
     }
 
-    private fun findAndSelectBestServers(autoStart: Boolean) {
-        if (!isSearching.compareAndSet(false, true)) return
-
-        val rawInput = subInput.text.toString().trim()
-        if (rawInput.isBlank()) {
-            isSearching.set(false)
-            Toast.makeText(this, "Укажите ссылки на подписки или vless://", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val filterAiCountries = aiCountryCheck.isChecked
-
-        runOnUiThread {
-            findBtn.isEnabled = false
-            findBtn.text = "Сканирование..."
-        }
-
-        Thread {
-            try {
-                if (BypassVpnService.isRunning) {
-                    BypassVpnService.log("Останавливаю VPN перед поиском серверов...")
-                    stopVpnService()
-                    Thread.sleep(600)
-                }
-
-                val lines = rawInput.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                val allParsed = LinkedHashMap<String, VlessNode>()
-
-                // 1. Загружаем все указанные URL и/или прямые vless:// ключи
-                val urls = lines.filter { it.startsWith("http://", true) || it.startsWith("https://", true) }
-                val directUris = lines.filter { it.startsWith("vless://", true) }
-
-                directUris.forEach { uri ->
-                    VlessParser.parseVlessUri(uri)?.let { n ->
-                        allParsed["${n.host}:${n.port}:${n.uuid}"] = n
-                    }
-                }
-
-                if (urls.isNotEmpty()) {
-                    BypassVpnService.log("Загрузка ${urls.size} баз(ы) с GitHub...")
-                    val dlPool = Executors.newFixedThreadPool(minOf(urls.size, 6))
-                    try {
-                        val futures = urls.map { u ->
-                            dlPool.submit(Callable {
-                                try {
-                                    val txt = downloadText(u)
-                                    val parsed = VlessParser.parseSubscription(txt)
-                                    BypassVpnService.log("  + ${parsed.size} ключей из ${u.substringAfterLast('/')}")
-                                    parsed
-                                } catch (e: Exception) {
-                                    BypassVpnService.log("  ! Ошибка ${u.substringAfterLast('/')}: ${e.message}")
-                                    emptyList<VlessNode>()
-                                }
-                            })
-                        }
-                        futures.forEach { f ->
-                            f.get().forEach { n ->
-                                allParsed["${n.host}:${n.port}:${n.uuid}"] = n
-                            }
-                        }
-                    } finally {
-                        dlPool.shutdownNow()
-                    }
-                }
-
-                var uniqueNodes = allParsed.values.toList()
-                BypassVpnService.log("Всего уникальных VLESS: ${uniqueNodes.size}")
-
-                if (filterAiCountries) {
-                    val before = uniqueNodes.size
-                    uniqueNodes = uniqueNodes.filterNot { VlessParser.isGeoBlockedForAi(it) }
-                    BypassVpnService.log("После фильтра стран для ИИ: ${uniqueNodes.size} (отсеяно ${before - uniqueNodes.size})")
-                }
-
-                if (uniqueNodes.isEmpty()) {
-                    BypassVpnService.log("ОШИБКА: подходящих VLESS-серверов не найдено.")
-                    return@Thread
-                }
-
-                // Приоритет протоколу Reality (быстрее и стабильнее WebSocket), перемешиваем для свежести
-                val realityList = uniqueNodes.filter { it.security == "reality" }.shuffled()
-                val otherList = uniqueNodes.filter { it.security != "reality" }.shuffled()
-                val candidates = (realityList.take(240) + otherList.take(80)).take(300)
-
-                // Этап 1: быстрый параллельный TCP-пинг (32 потока)
-                BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} серверов (Reality в приоритете)...")
-                val tcpPool = Executors.newFixedThreadPool(32)
-                val tcpAlive = try {
-                    val futures = candidates.map { node ->
-                        tcpPool.submit(Callable {
-                            val ping = tcpPing(node.host, node.port, 1400)
-                            if (ping >= 0) node to ping else null
-                        })
-                    }
-                    futures.mapNotNull {
-                        try { it.get() } catch (_: Exception) { null }
-                    }.sortedBy { (node, ping) ->
-                        // Небольшой бонус для Reality при сортировке кандидатов
-                        if (node.security == "reality") ping else ping + 120
-                    }
-                } finally {
-                    tcpPool.shutdownNow()
-                }
-
-                BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Запускаю реальный тест Xray...")
-                if (tcpAlive.isEmpty()) {
-                    BypassVpnService.log("ОШИБКА: ни один сервер не ответил по TCP.")
-                    return@Thread
-                }
-
-                // Этап 2: параллельная проверка до 60 узлов в 6 потоков через Xray -> Google
-                val targetCount = 25
-                val toVerify = tcpAlive.take(60)
-                val verified = Collections.synchronizedList(mutableListOf<Pair<VlessNode, Long>>())
-                val portCounter = AtomicInteger(10820)
-                val testedCounter = AtomicInteger(0)
-
-                val xrayPool = Executors.newFixedThreadPool(6)
-                try {
-                    val tasks = toVerify.map { (node, _) ->
-                        xrayPool.submit {
-                            if (verified.size >= targetCount) return@submit
-                            val tempPort = portCounter.getAndIncrement()
-                            val httpMs = testNodeThroughXray(node, tempPort)
-                            val done = testedCounter.incrementAndGet()
-                            if (httpMs >= 0) {
-                                verified.add(node to httpMs)
-                                BypassVpnService.log("✓ [${verified.size}] ${httpMs}мс | ${node.name.take(30)} (${node.security}/${node.network})")
-                                runOnUiThread {
-                                    findBtn.text = "Найдено: ${verified.size}/$targetCount..."
-                                }
-                            } else if (done % 10 == 0) {
-                                BypassVpnService.log("...проверено $done/${toVerify.size}, найдено ${verified.size}")
-                            }
-                        }
-                    }
-                    tasks.forEach {
-                        try { it.get() } catch (_: Exception) {}
-                    }
-                } finally {
-                    xrayPool.shutdownNow()
-                }
-
-                if (verified.isEmpty()) {
-                    BypassVpnService.log("Ни один из ${toVerify.size} серверов не открыл Google. Попробуйте ещё раз (список перемешается).")
-                    return@Thread
-                }
-
-                val sorted = verified.sortedBy { it.second }.toMutableList()
-                workingNodes = sorted
-                currentIndex = 0
-                saveWorkingList(sorted)
-
-                val best = sorted[0]
-                BypassVpnService.log("ГОТОВО! Найдено ${sorted.size} рабочих серверов. Лучший: ${best.first.name} (${best.second} мс)")
-
-                runOnUiThread {
-                    setSelectedNode(best.first, best.second)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Найдено ${sorted.size} серверов! Лучший: ${best.second} мс",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    if (autoStart) {
-                        requestVpnAndStart()
-                    }
-                }
-            } catch (e: Exception) {
-                BypassVpnService.log("ОШИБКА поиска: ${e.javaClass.simpleName}: ${e.message}")
-            } finally {
-                isSearching.set(false)
-                runOnUiThread {
-                    findBtn.isEnabled = true
-                    findBtn.text = "Найти серверы (до 25)"
-                    updateListButtonText()
-                }
-            }
-        }.start()
-    }
-
-    private fun testNodeThroughXray(node: VlessNode, tempPort: Int): Long {
-        val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
-        if (!xrayBin.exists()) return -1L
-
-        val testConfigFile = File(cacheDir, "xray_test_$tempPort.json")
-        testConfigFile.writeText(
-            VlessParser.buildXrayConfig(
-                node = node,
-                socksPort = tempPort,
-                splitRu = false,
-                blockQuic = true,
-                isTestMode = true
-            )
-        )
-
-        var proc: Process? = null
-        return try {
-            proc = ProcessBuilder(xrayBin.absolutePath, "run", "-c", testConfigFile.absolutePath)
-                .redirectErrorStream(true)
-                .start()
-
-            var portReady = false
-            for (i in 0 until 8) {
-                if (!proc.isAlive) return -1L
-                if (tcpPing("127.0.0.1", tempPort, 100) >= 0) {
-                    portReady = true
-                    break
-                }
-                Thread.sleep(100)
-            }
-            if (!portReady) return -1L
-
-            val start = System.currentTimeMillis()
-            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", tempPort))
-            val conn = (URL("https://www.gstatic.com/generate_204").openConnection(proxy) as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 4000
-                instanceFollowRedirects = false
-                requestMethod = "GET"
-            }
-            val code = conn.responseCode
-            conn.disconnect()
-            val elapsed = System.currentTimeMillis() - start
-            if (code in 200..399) elapsed else -1L
-        } catch (_: Exception) {
-            -1L
-        } finally {
-            try { proc?.destroy() } catch (_: Exception) {}
-            try { proc?.destroyForcibly() } catch (_: Exception) {}
-            try { testConfigFile.delete() } catch (_: Exception) {}
-        }
-    }
-
-    private fun tcpPing(host: String, port: Int, timeoutMs: Int): Long {
-        val start = System.currentTimeMillis()
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), timeoutMs)
-            }
-            System.currentTimeMillis() - start
-        } catch (_: Exception) {
-            -1L
-        }
-    }
-
-    private fun downloadText(urlStr: String): String {
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10000
-            readTimeout = 12000
-            requestMethod = "GET"
-            setRequestProperty("User-Agent", "MyBypassXray/2.0")
-        }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) throw RuntimeException("HTTP $code")
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    private fun saveWorkingList(list: List<Pair<VlessNode, Long>>) {
-        val serialized = list.joinToString("\n") { (node, ping) -> "$ping\t${node.rawUri}" }
-        getSharedPreferences("xray_prefs", MODE_PRIVATE).edit()
-            .putString("working_list", serialized)
-            .apply()
-    }
-
-    private fun loadSavedWorkingList(prefs: android.content.SharedPreferences) {
-        val raw = prefs.getString("working_list", "").orEmpty()
-        if (raw.isBlank()) return
-        val restored = mutableListOf<Pair<VlessNode, Long>>()
-        for (line in raw.lines()) {
-            val tab = line.indexOf('\t')
-            if (tab <= 0) continue
-            val ping = line.substring(0, tab).toLongOrNull() ?: continue
-            val node = VlessParser.parseVlessUri(line.substring(tab + 1)) ?: continue
-            restored.add(node to ping)
-        }
-        workingNodes = restored
-    }
-
-    private fun setSelectedNode(node: VlessNode, pingMs: Long) {
-        selectedNode = node
-        getSharedPreferences("xray_prefs", MODE_PRIVATE).edit()
-            .putString("selected_vless", node.rawUri)
-            .apply()
-        refreshSelectedLabel(pingMs)
-    }
-
-    private fun refreshSelectedLabel(pingMs: Long) {
-        val node = selectedNode
-        selectedServerView.text = if (node == null) {
-            "Сервер не выбран. Нажмите «Найти серверы (до 25)»."
+    private fun refreshSelectedLabel() {
+        val current = selectedTested
+        val idx = workingNodes.indexOfFirst { it.node.rawUri == current?.node?.rawUri }
+        selectedServerView.text = if (current == null) {
+            "Сервер не выбран. Нажмите «Автопоиск + Подкл.»."
         } else {
-            val pingStr = if (pingMs >= 0) " • ${pingMs} мс" else ""
-            val poolStr = if (workingNodes.isNotEmpty()) " [${currentIndex + 1}/${workingNodes.size}]" else ""
-            "Сервер$poolStr (нажмите для выбора): ${node.name}\n${node.host}:${node.port} (${node.security}/${node.network})$pingStr"
+            val poolStr = if (idx >= 0 && workingNodes.isNotEmpty()) " [${idx + 1}/${workingNodes.size}]" else ""
+            val pingStr = if (current.pingMs >= 0) " • ${current.pingMs} мс" else ""
+            val cc = if (current.countryCode.isNotBlank()) "[${current.countryCode}] " else ""
+            "Сервер$poolStr: $cc${current.node.name}\n" +
+                "${current.capabilitiesTag()} • ${current.node.security}/${current.node.network}$pingStr"
         }
-        updateListButtonText()
-    }
-
-    private fun updateListButtonText() {
-        listBtn.text = "Список (${workingNodes.size})"
+        val fullCount = workingNodes.count { it.allWork }
+        listBtn.text = if (fullCount > 0) {
+            "Список (${workingNodes.size} | ВСЕ: $fullCount)"
+        } else {
+            "Список (${workingNodes.size})"
+        }
     }
 
     private fun savePrefs() {
-        getSharedPreferences("xray_prefs", MODE_PRIVATE).edit()
+        getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).edit()
             .putString("sub_url", subInput.text.toString().trim())
             .putBoolean("ai_country_filter", aiCountryCheck.isChecked)
             .putBoolean("split_ru", splitRuCheck.isChecked)
@@ -675,9 +373,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        workingNodes = ServerScanner.loadWorkingList(this)
+        selectedTested = ServerScanner.loadSelectedNode(this)
         logView.text = BypassVpnService.getDiagnosticsReport(this)
-        BypassVpnService.onStateListener = { running ->
-            runOnUiThread { updateUi(running) }
+
+        BypassVpnService.onStateListener = {
+            runOnUiThread {
+                workingNodes = ServerScanner.loadWorkingList(this)
+                selectedTested = ServerScanner.loadSelectedNode(this)
+                refreshSelectedLabel()
+                updateUi()
+            }
         }
         BypassVpnService.onLogListener = { fullLog ->
             runOnUiThread {
@@ -685,32 +391,66 @@ class MainActivity : AppCompatActivity() {
                 logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
-        updateUi(BypassVpnService.isRunning)
+        ServerScanner.onProgressListener = { progress ->
+            runOnUiThread {
+                if (progress.isNotBlank()) {
+                    findBtn.text = progress
+                } else {
+                    findBtn.text = "Автопоиск + Подкл."
+                }
+            }
+        }
+        ServerScanner.onListUpdatedListener = { updated ->
+            runOnUiThread {
+                workingNodes = updated.toMutableList()
+                selectedTested = ServerScanner.loadSelectedNode(this)
+                refreshSelectedLabel()
+            }
+        }
+        refreshSelectedLabel()
+        updateUi()
     }
 
     override fun onStop() {
         BypassVpnService.onStateListener = null
         BypassVpnService.onLogListener = null
+        ServerScanner.onProgressListener = null
+        ServerScanner.onListUpdatedListener = null
         super.onStop()
     }
 
-    private fun requestVpnAndStart() {
-        if (selectedNode == null) {
-            Toast.makeText(this, "Сначала найдите серверы", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val intent = VpnService.prepare(this)
-        if (intent != null) {
-            vpnPermissionLauncher.launch(intent)
+    private fun requestVpnAndRun(action: String) {
+        val prepIntent = VpnService.prepare(this)
+        if (prepIntent != null) {
+            pendingServiceAction = action
+            vpnPermissionLauncher.launch(prepIntent)
         } else {
-            startVpnService()
+            when (action) {
+                BypassVpnService.ACTION_AUTO_CONNECT,
+                BypassVpnService.ACTION_RESCAN_AND_CONNECT -> sendServiceAction(action)
+                else -> startSelectedVpn()
+            }
         }
     }
 
-    private fun startVpnService() {
-        val node = selectedNode ?: return
+    private fun sendServiceAction(action: String) {
+        val intent = Intent(this, BypassVpnService::class.java).apply {
+            this.action = action
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun startSelectedVpn() {
+        val tested = selectedTested ?: run {
+            sendServiceAction(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
+            return
+        }
         val configJson = VlessParser.buildXrayConfig(
-            node = node,
+            node = tested.node,
             socksPort = 1080,
             splitRu = splitRuCheck.isChecked,
             blockQuic = blockQuicCheck.isChecked,
@@ -719,7 +459,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, BypassVpnService::class.java).apply {
             action = BypassVpnService.ACTION_START
             putExtra(BypassVpnService.EXTRA_CONFIG_JSON, configJson)
-            putExtra(BypassVpnService.EXTRA_SERVER_NAME, node.name)
+            putExtra(BypassVpnService.EXTRA_SERVER_NAME, tested.shortTitle())
             putExtra(BypassVpnService.EXTRA_BLOCK_IPV6, blockIpv6Check.isChecked)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -736,23 +476,41 @@ class MainActivity : AppCompatActivity() {
         startService(intent)
     }
 
-    private fun updateUi(running: Boolean) {
-        if (running) {
-            val srv = BypassVpnService.activeServerName.ifBlank { selectedNode?.name.orEmpty() }
-            statusView.text = "● Подключено (Xray VLESS: $srv)"
-            statusView.setTextColor(Color.parseColor("#4CAF50"))
-            toggleBtn.text = "ОСТАНОВИТЬ VPN"
-            toggleBtn.background = roundedBg("#C62828", dp(12).toFloat())
-        } else {
-            statusView.text = "○ Отключено"
-            statusView.setTextColor(Color.parseColor("#9E9E9E"))
-            toggleBtn.text = "ЗАПУСТИТЬ VPN"
-            toggleBtn.background = roundedBg("#2E7D32", dp(12).toFloat())
+    private fun updateUi() {
+        val running = BypassVpnService.isRunning
+        val searching = BypassVpnService.isAutoSearching
+
+        when {
+            searching -> {
+                statusView.text = "● Автопоиск: ${BypassVpnService.searchStatusText.ifBlank { "сканирование..." }}"
+                statusView.setTextColor(Color.parseColor("#FFB74D"))
+                toggleBtn.text = "ОТМЕНИТЬ ПОИСК"
+                toggleBtn.background = roundedBg("#E65100", dp(12).toFloat())
+                findBtn.isEnabled = false
+            }
+            running -> {
+                val srv = BypassVpnService.activeServerName.ifBlank { selectedTested?.shortTitle().orEmpty() }
+                statusView.text = "● Подключено: $srv"
+                statusView.setTextColor(Color.parseColor("#4CAF50"))
+                toggleBtn.text = "ОСТАНОВИТЬ VPN"
+                toggleBtn.background = roundedBg("#C62828", dp(12).toFloat())
+                findBtn.isEnabled = true
+                findBtn.text = "Автопоиск + Подкл."
+            }
+            else -> {
+                statusView.text = "○ Отключено"
+                statusView.setTextColor(Color.parseColor("#9E9E9E"))
+                toggleBtn.text = "ЗАПУСТИТЬ VPN"
+                toggleBtn.background = roundedBg("#2E7D32", dp(12).toFloat())
+                findBtn.isEnabled = true
+                findBtn.text = "Автопоиск + Подкл."
+            }
         }
         toggleBtn.gravity = Gravity.CENTER
-        splitRuCheck.isEnabled = !running
-        blockQuicCheck.isEnabled = !running
-        blockIpv6Check.isEnabled = !running
+        val editable = !running && !searching
+        splitRuCheck.isEnabled = editable
+        blockQuicCheck.isEnabled = editable
+        blockIpv6Check.isEnabled = editable
     }
 
     private fun sectionLabel(text: String): TextView = TextView(this).apply {
@@ -782,4 +540,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    companion object {
+        const val EXTRA_AUTO_ACTION = "extra_auto_action"
+    }
 }
