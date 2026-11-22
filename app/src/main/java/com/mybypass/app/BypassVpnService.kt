@@ -42,46 +42,136 @@ class BypassVpnService : VpnService() {
             ACTION_START -> {
                 val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON).orEmpty()
                 val serverName = intent.getStringExtra(EXTRA_SERVER_NAME).orEmpty().ifBlank { "VLESS" }
-                val blockIpv6 = intent.getBooleanExtra(EXTRA_BLOCK_IPV6, true)
+                val blockIpv6 = intent.getBooleanExtra(EXTRA_BLOCK_IPV6, false)
 
-                log("Запуск Xray VPN ($serverName)...")
-                try {
-                    startForegroundNotification(serverName)
-                } catch (e: Throwable) {
-                    log("ОШИБКА startForeground: ${e.javaClass.simpleName}: ${e.message}")
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-
+                if (!ensureForeground("Подключение: $serverName")) return START_NOT_STICKY
                 executor.execute {
                     try {
+                        stopTunnelInternal(stopService = false)
                         startTunnel(configJson, serverName, blockIpv6)
                     } catch (e: Throwable) {
                         log("ОШИБКА startTunnel: ${Log.getStackTraceString(e)}")
-                        stopTunnel()
+                        stopTunnelInternal(stopService = true)
                     }
                 }
             }
+
+            ACTION_AUTO_CONNECT -> {
+                if (!ensureForeground("Автоподбор лучшего сервера...")) return START_NOT_STICKY
+                isAutoSearching = true
+                searchStatusText = "Проверка сервера..."
+                notifyState(applicationContext)
+
+                executor.execute {
+                    handleAutoConnect(forceRescan = false)
+                }
+            }
+
+            ACTION_RESCAN_AND_CONNECT -> {
+                if (!ensureForeground("Поиск лучшего сервера (ИИ + все приложения)...")) return START_NOT_STICKY
+                isAutoSearching = true
+                searchStatusText = "Загрузка баз..."
+                notifyState(applicationContext)
+
+                executor.execute {
+                    handleAutoConnect(forceRescan = true)
+                }
+            }
+
             ACTION_STOP -> {
-                executor.execute { stopTunnel() }
+                ServerScanner.cancelScan()
+                executor.execute {
+                    isAutoSearching = false
+                    searchStatusText = ""
+                    stopTunnelInternal(stopService = true)
+                }
             }
         }
         return START_STICKY
     }
 
-    private fun startTunnel(configJson: String, serverName: String, blockIpv6: Boolean) {
-        if (isRunning) return
+    private fun handleAutoConnect(forceRescan: Boolean) {
+        try {
+            stopTunnelInternal(stopService = false)
 
+            var chosen: TestedNode? = null
+
+            if (!forceRescan) {
+                val savedList = ServerScanner.loadWorkingList(applicationContext)
+                val preferred = ServerScanner.loadSelectedNode(applicationContext) ?: savedList.firstOrNull()
+                if (preferred != null) {
+                    searchStatusText = "Проверка ${preferred.node.name.take(14)}..."
+                    updateNotification("Проверка: ${preferred.node.name.take(24)}")
+                    notifyState(applicationContext)
+                    log("Быстрая проверка сохранённого сервера: ${preferred.node.name}...")
+
+                    val rechecked = ServerScanner.verifySingleNode(applicationContext, preferred.node, 10825)
+                    if (rechecked != null && rechecked.priorityTier() <= 1) {
+                        log("Сервер жив и поддерживает ИИ+приложения: ${rechecked.shortTitle()} (${rechecked.pingMs}мс)")
+                        chosen = rechecked
+                        ServerScanner.saveSelectedNode(applicationContext, rechecked)
+                    } else {
+                        log("Сохранённый сервер не прошёл проверку -> запускаю свежий автопоиск...")
+                    }
+                }
+            }
+
+            if (chosen == null) {
+                val prevListener = ServerScanner.onProgressListener
+                ServerScanner.onProgressListener = { progress ->
+                    searchStatusText = progress
+                    if (progress.isNotBlank()) {
+                        updateNotification(progress)
+                    }
+                    notifyState(applicationContext)
+                    prevListener?.invoke(progress)
+                }
+                val found = try {
+                    ServerScanner.scanAll(applicationContext)
+                } finally {
+                    ServerScanner.onProgressListener = prevListener
+                }
+                chosen = found.firstOrNull()
+            }
+
+            isAutoSearching = false
+            searchStatusText = ""
+
+            if (chosen == null) {
+                log("Автопоиск не нашёл рабочих серверов.")
+                stopTunnelInternal(stopService = true)
+                return
+            }
+
+            val configJson = VlessParser.buildXrayConfig(
+                node = chosen.node,
+                socksPort = 1080,
+                splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
+                blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
+                isTestMode = false
+            )
+            val label = chosen.shortTitle()
+            updateNotification(label)
+            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext))
+        } catch (e: Throwable) {
+            isAutoSearching = false
+            searchStatusText = ""
+            log("ОШИБКА автоподключения: ${Log.getStackTraceString(e)}")
+            stopTunnelInternal(stopService = true)
+        }
+    }
+
+    private fun startTunnel(configJson: String, serverName: String, blockIpv6: Boolean) {
         if (configJson.isBlank()) {
             log("ОШИБКА: пустая конфигурация Xray.")
-            stopTunnel()
+            stopTunnelInternal(stopService = true)
             return
         }
 
         val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
         if (!xrayBin.exists()) {
             log("ОШИБКА: не найден бинарник ${xrayBin.absolutePath}")
-            stopTunnel()
+            stopTunnelInternal(stopService = true)
             return
         }
 
@@ -115,25 +205,24 @@ class BypassVpnService : VpnService() {
                 }
             }.apply { isDaemon = true }.start()
 
-            Thread.sleep(400)
+            Thread.sleep(350)
             if (!proc.isAlive) {
-                log("ОШИБКА: Xray не запустился (код ${proc.exitValue()}). Выберите другой сервер.")
-                stopTunnel()
+                log("ОШИБКА: Xray не запустился (код ${proc.exitValue()}).")
+                stopTunnelInternal(stopService = true)
                 return
             }
-            log("Xray-core запущен на 127.0.0.1:1080")
         } catch (e: Throwable) {
             log("ОШИБКА запуска Xray: ${e.javaClass.simpleName}: ${e.message}")
-            stopTunnel()
+            stopTunnelInternal(stopService = true)
             return
         }
 
+        // Стандартный MTU 1500 для стабильной работы UDP-звонков в Telegram и WhatsApp
         val builder = Builder()
             .setSession("MyBypassXray")
-            .setMtu(8500)
+            .setMtu(1500)
             .addAddress("10.10.10.2", 32)
             .addRoute("0.0.0.0", 0)
-            // DNS перехватывается Xray (порт 53 -> dns-out -> tcp://1.1.1.1 поверх VLESS)
             .addDnsServer("1.1.1.1")
             .addDnsServer("8.8.8.8")
 
@@ -147,7 +236,6 @@ class BypassVpnService : VpnService() {
         }
 
         try {
-            // Исключаем своё приложение, чтобы Xray мог ходить к VLESS-серверу напрямую
             builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
             log("Предупреждение addDisallowedApplication: ${e.message}")
@@ -162,7 +250,7 @@ class BypassVpnService : VpnService() {
 
         if (tunInterface == null) {
             log("ОШИБКА: система не выдала TUN-интерфейс")
-            stopTunnel()
+            stopTunnelInternal(stopService = true)
             return
         }
 
@@ -171,7 +259,7 @@ class BypassVpnService : VpnService() {
         tproxyConfig.writeText(
             """
             tunnel:
-              mtu: 8500
+              mtu: 1500
               ipv4: 10.10.10.2
             socks5:
               port: 1080
@@ -179,8 +267,10 @@ class BypassVpnService : VpnService() {
               udp: 'udp'
             misc:
               task-stack-size: 131072
-              connect-timeout: 5000
-              read-write-timeout: 60000
+              udp-copy-buffer-nums: 20
+              connect-timeout: 10000
+              tcp-read-write-timeout: 300000
+              udp-read-write-timeout: 120000
               log-level: warn
             """.trimIndent()
         )
@@ -190,15 +280,16 @@ class BypassVpnService : VpnService() {
             tproxyStarted = true
             isRunning = true
             activeServerName = serverName
-            notifyState()
+            updateNotification(serverName)
+            notifyState(applicationContext)
             log("VPN активен! Сервер: $serverName")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
-            stopTunnel()
+            stopTunnelInternal(stopService = true)
         }
     }
 
-    private fun stopTunnel() {
+    private fun stopTunnelInternal(stopService: Boolean) {
         if (tproxyStarted) {
             try {
                 TProxyService.TProxyStopService()
@@ -219,19 +310,50 @@ class BypassVpnService : VpnService() {
         }
         tunInterface = null
 
+        val wasRunning = isRunning
         isRunning = false
         activeServerName = ""
-        notifyState()
-        log("VPN остановлен.")
 
-        try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_: Exception) {
+        if (stopService) {
+            isAutoSearching = false
+            searchStatusText = ""
+            if (wasRunning) log("VPN остановлен.")
+            notifyState(applicationContext)
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } catch (_: Exception) {
+            }
+            stopSelf()
+        } else {
+            notifyState(applicationContext)
         }
-        stopSelf()
     }
 
-    private fun startForegroundNotification(serverName: String) {
+    private fun ensureForeground(text: String): Boolean {
+        return try {
+            val notification = buildNotification(text)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(1, notification)
+            }
+            true
+        } catch (e: Throwable) {
+            log("ОШИБКА startForeground: ${e.javaClass.simpleName}: ${e.message}")
+            stopSelf()
+            false
+        }
+    }
+
+    private fun updateNotification(text: String) {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(1, buildNotification(text))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun buildNotification(text: String): Notification {
         val channelId = "mybypass_vpn_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -249,38 +371,34 @@ class BypassVpnService : VpnService() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notificationBuilder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
 
-        val notification = notificationBuilder
-            .setContentTitle("MyBypassXray активен")
-            .setContentText("Сервер: $serverName")
+        return builder
+            .setContentTitle(if (isAutoSearching) "MyBypass — Автоподбор" else "MyBypass Xray активен")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(1, notification)
-        }
     }
 
     override fun onRevoke() {
         log("VPN отозван системой.")
-        executor.execute { stopTunnel() }
+        ServerScanner.cancelScan()
+        executor.execute { stopTunnelInternal(stopService = true) }
         super.onRevoke()
     }
 
     override fun onDestroy() {
+        ServerScanner.cancelScan()
         executor.execute {
             if (isRunning || tunInterface != null || xrayProcess != null) {
-                stopTunnel()
+                stopTunnelInternal(stopService = false)
             }
         }
         executor.shutdown()
@@ -290,6 +408,8 @@ class BypassVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.mybypass.app.START"
         const val ACTION_STOP = "com.mybypass.app.STOP"
+        const val ACTION_AUTO_CONNECT = "com.mybypass.app.AUTO_CONNECT"
+        const val ACTION_RESCAN_AND_CONNECT = "com.mybypass.app.RESCAN_AND_CONNECT"
         const val EXTRA_CONFIG_JSON = "extra_config_json"
         const val EXTRA_SERVER_NAME = "extra_server_name"
         const val EXTRA_BLOCK_IPV6 = "extra_block_ipv6"
@@ -298,6 +418,14 @@ class BypassVpnService : VpnService() {
 
         @Volatile
         var isRunning: Boolean = false
+            private set
+
+        @Volatile
+        var isAutoSearching: Boolean = false
+            private set
+
+        @Volatile
+        var searchStatusText: String = ""
             private set
 
         @Volatile
@@ -362,7 +490,7 @@ class BypassVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
             }
-            return sb.toString().trim().ifEmpty { "Нажмите «Найти живой сервер (Авто)», чтобы загрузить бесплатные VLESS-ключи с GitHub." }
+            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск + Подкл.», чтобы подобрать самый быстрый сервер со всеми ИИ и приложениями." }
         }
 
         @Synchronized
@@ -386,8 +514,9 @@ class BypassVpnService : VpnService() {
             onLogListener?.invoke(getLogs())
         }
 
-        private fun notifyState() {
+        private fun notifyState(context: Context) {
             onStateListener?.invoke(isRunning)
+            BypassTileService.requestAllTilesUpdate(context)
         }
     }
 }
