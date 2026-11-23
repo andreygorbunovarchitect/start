@@ -43,12 +43,12 @@ object VlessParser {
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
+        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-SNI-RU-all.txt",
         "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt",
         "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/output/vless.txt",
         "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
     )
 
-    // Только отобранные вручную списки для РФ идут в первую очередь без разбавления
     fun isCuratedUrl(url: String): Boolean {
         return url.contains("igareck/", ignoreCase = true) ||
             url.contains("patterniha/", ignoreCase = true)
@@ -363,6 +363,7 @@ object VlessParser {
         })
 
         if (isTestMode) {
+            // На Android отсутствует /etc/resolv.conf — задаём явный DNS для резолва доменных серверов
             root.put("dns", JSONObject().apply {
                 put("servers", JSONArray().put("77.88.8.8").put("1.1.1.1"))
                 put("queryStrategy", "UseIPv4")
@@ -445,6 +446,9 @@ object VlessParser {
         outbounds.put(JSONObject().apply {
             put("tag", "direct")
             put("protocol", "freedom")
+            put("settings", JSONObject().apply {
+                put("domainStrategy", "UseIPv4")
+            })
         })
         outbounds.put(JSONObject().apply {
             put("tag", "dns-out")
@@ -592,9 +596,11 @@ object VlessParser {
         val streamSettings = JSONObject().apply {
             put("network", node.network)
             put("security", node.security)
+            // domainStrategy=UseIPv4 заставляет Xray использовать свой DNS-блок вместо несуществующего /etc/resolv.conf на Android
             put("sockopt", JSONObject().apply {
                 put("tcpNoDelay", true)
                 put("tcpKeepAliveInterval", 30)
+                put("domainStrategy", "UseIPv4")
             })
 
             when (node.security) {
