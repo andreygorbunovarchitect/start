@@ -48,10 +48,10 @@ object VlessParser {
         "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
     )
 
+    // Только отобранные вручную списки для РФ идут в первую очередь без разбавления
     fun isCuratedUrl(url: String): Boolean {
         return url.contains("igareck/", ignoreCase = true) ||
-            url.contains("patterniha/", ignoreCase = true) ||
-            url.contains("kort0881/", ignoreCase = true)
+            url.contains("patterniha/", ignoreCase = true)
     }
 
     val DIRECT_DOMAINS = listOf(
@@ -363,7 +363,6 @@ object VlessParser {
         })
 
         if (isTestMode) {
-            // На Android нет /etc/resolv.conf, поэтому в тестовом режиме обязательно задаём явный DNS
             root.put("dns", JSONObject().apply {
                 put("servers", JSONArray().put("77.88.8.8").put("1.1.1.1"))
                 put("queryStrategy", "UseIPv4")
@@ -380,7 +379,6 @@ object VlessParser {
                 })
             })
 
-            // FakeDNS: мгновенный DNS-ответ за 0 мс для VPN-доменов без таймаутов DoH
             root.put("fakedns", JSONArray().put(JSONObject().apply {
                 put("ipPool", "198.18.0.0/15")
                 put("poolSize", 65535)
@@ -460,7 +458,6 @@ object VlessParser {
 
         val rules = JSONArray()
         if (!isTestMode) {
-            // 1. Все DNS-запросы (порт 53) во встроенный DNS Xray
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -468,14 +465,12 @@ object VlessParser {
                 put("outboundTag", "dns-out")
             })
 
-            // 2. Прямой DNS 77.88.8.8 идёт напрямую мимо туннеля
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("77.88.8.8/32"))
                 put("outboundTag", "direct")
             })
 
-            // 3. Если браузер обращается к DoH 1.1.1.1 / 8.8.8.8 — пускаем через proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("1.1.1.1/32").put("8.8.8.8/32"))
@@ -483,7 +478,6 @@ object VlessParser {
                 put("outboundTag", "proxy")
             })
 
-            // 4. Блокируем только QUIC (чтобы Google/Gemini/YT/Meta шли по стабильному TCP)
             if (blockQuic) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
@@ -494,7 +488,6 @@ object VlessParser {
                 })
             }
 
-            // 5. Локальные сети напрямую
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().apply {
@@ -506,7 +499,6 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
-            // 6. Любые FakeDNS-адреса (198.18.0.0/15) строго через proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("198.18.0.0/15"))
@@ -514,28 +506,24 @@ object VlessParser {
             })
 
             if (smartBypass) {
-                // 7. Умный обход: все домены Google/Gemini/ИИ/YT/Discord/Meta/TG идут в proxy ДО правила domain:ru
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("domain", JSONArray(PROXY_DOMAINS))
                     put("outboundTag", "proxy")
                 })
 
-                // 8. РФ, банки и локальные сервисы напрямую
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("domain", JSONArray(DIRECT_DOMAINS))
                     put("outboundTag", "direct")
                 })
 
-                // 9. Официальные подсети Telegram и Discord Voice -> proxy
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("ip", JSONArray(PROXY_IP_CIDRS))
                     put("outboundTag", "proxy")
                 })
 
-                // 10. Голосовые UDP-порты WebRTC / Discord -> proxy
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("inboundTag", JSONArray().put("socks-in"))
@@ -544,7 +532,6 @@ object VlessParser {
                     put("outboundTag", "proxy")
                 })
 
-                // 11. Всё остальное на телефоне — напрямую на 100% скорости
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("network", "tcp,udp")
