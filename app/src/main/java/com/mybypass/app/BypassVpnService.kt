@@ -40,19 +40,17 @@ class BypassVpnService : VpnService() {
         initLogger(applicationContext)
         when (intent?.action) {
             ACTION_START -> {
-                val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON).orEmpty()
-                val serverName = intent.getStringExtra(EXTRA_SERVER_NAME).orEmpty().ifBlank { "VLESS" }
+                val rawUri = intent.getStringExtra(EXTRA_VLESS_URI).orEmpty()
+                val skipCheck = intent.getBooleanExtra(EXTRA_SKIP_CHECK, false)
                 val blockIpv6 = intent.getBooleanExtra(EXTRA_BLOCK_IPV6, false)
 
-                if (!ensureForeground("Подключение: $serverName")) return START_NOT_STICKY
+                if (!ensureForeground("Проверка и подключение...")) return START_NOT_STICKY
+                isAutoSearching = true
+                searchStatusText = "Проверка сервера..."
+                notifyState(applicationContext)
+
                 executor.execute {
-                    try {
-                        stopTunnelInternal(stopService = false)
-                        startTunnel(configJson, serverName, blockIpv6)
-                    } catch (e: Throwable) {
-                        log("ОШИБКА startTunnel: ${Log.getStackTraceString(e)}")
-                        stopTunnelInternal(stopService = true)
-                    }
+                    handleStartWithPrecheck(rawUri, skipCheck, blockIpv6)
                 }
             }
 
@@ -68,7 +66,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_RESCAN_AND_CONNECT -> {
-                if (!ensureForeground("Поиск лучшего сервера (ИИ + все приложения)...")) return START_NOT_STICKY
+                if (!ensureForeground("Поиск лучшего сервера (Gemini + ИИ)...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Загрузка баз..."
                 notifyState(applicationContext)
@@ -90,6 +88,84 @@ class BypassVpnService : VpnService() {
         return START_STICKY
     }
 
+    private fun handleStartWithPrecheck(rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
+        try {
+            stopTunnelInternal(stopService = false)
+
+            var target = ServerScanner.loadSelectedNode(applicationContext)
+            if (rawUri.isNotBlank() && target?.node?.rawUri != rawUri) {
+                val parsed = VlessParser.parseVlessUri(rawUri, isCuratedSource = true)
+                if (parsed != null) {
+                    target = TestedNode(node = parsed, pingMs = -1L)
+                }
+            }
+
+            if (target == null) {
+                handleAutoConnect(forceRescan = true)
+                return
+            }
+
+            if (!skipCheck) {
+                searchStatusText = "Проверка ${target.node.name.take(14)}..."
+                updateNotification("Проверка: ${target.node.name.take(24)}")
+                notifyState(applicationContext)
+                log("Проверка доступности сервера: ${target.shortTitle()}...")
+
+                val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824)
+                if (livePing < 0) {
+                    log("Сервер перестал отвечать. Ищу живой в списке...")
+                    val savedList = ServerScanner.loadWorkingList(applicationContext)
+                    var replacement: TestedNode? = null
+                    var checked = 0
+                    for (cand in savedList) {
+                        if (cand.node.rawUri == target.node.rawUri) continue
+                        if (checked >= 5) break
+                        checked++
+                        val cp = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10824)
+                        if (cp > 0) {
+                            replacement = cand.copy(pingMs = cp)
+                            break
+                        }
+                    }
+
+                    if (replacement != null) {
+                        target = replacement
+                        ServerScanner.saveSelectedNode(applicationContext, replacement)
+                        log("Автопереключение на живой сервер: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
+                    } else {
+                        log("Сохранённые серверы устарели -> запускаю свежий автопоиск...")
+                        handleAutoConnect(forceRescan = true)
+                        return
+                    }
+                } else {
+                    target = target.copy(pingMs = livePing)
+                    ServerScanner.saveSelectedNode(applicationContext, target)
+                    log("Сервер жив (${livePing}мс). Подключаю...")
+                }
+            }
+
+            isAutoSearching = false
+            searchStatusText = ""
+
+            val configJson = VlessParser.buildXrayConfig(
+                node = target.node,
+                socksPort = 1080,
+                smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
+                splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
+                blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
+                isTestMode = false
+            )
+            val label = target.shortTitle()
+            updateNotification(label)
+            startTunnel(configJson, label, blockIpv6)
+        } catch (e: Throwable) {
+            isAutoSearching = false
+            searchStatusText = ""
+            log("ОШИБКА запуска: ${Log.getStackTraceString(e)}")
+            stopTunnelInternal(stopService = true)
+        }
+    }
+
     private fun handleAutoConnect(forceRescan: Boolean) {
         try {
             stopTunnelInternal(stopService = false)
@@ -103,15 +179,15 @@ class BypassVpnService : VpnService() {
                     searchStatusText = "Проверка ${preferred.node.name.take(14)}..."
                     updateNotification("Проверка: ${preferred.node.name.take(24)}")
                     notifyState(applicationContext)
-                    log("Быстрая проверка сохранённого сервера: ${preferred.node.name}...")
+                    log("Быстрая проверка сервера: ${preferred.shortTitle()}...")
 
-                    val rechecked = ServerScanner.verifySingleNode(applicationContext, preferred.node, 10825)
-                    if (rechecked != null && rechecked.priorityTier() <= 1) {
-                        log("Сервер жив и поддерживает ИИ+приложения: ${rechecked.shortTitle()} (${rechecked.pingMs}мс)")
-                        chosen = rechecked
-                        ServerScanner.saveSelectedNode(applicationContext, rechecked)
+                    val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825)
+                    if (livePing > 0) {
+                        chosen = preferred.copy(pingMs = livePing)
+                        ServerScanner.saveSelectedNode(applicationContext, chosen)
+                        log("Сервер жив (${livePing}мс): ${chosen.shortTitle()}")
                     } else {
-                        log("Сохранённый сервер не прошёл проверку -> запускаю свежий автопоиск...")
+                        log("Сервер не отвечает -> запускаю свежий автопоиск...")
                     }
                 }
             }
@@ -146,6 +222,7 @@ class BypassVpnService : VpnService() {
             val configJson = VlessParser.buildXrayConfig(
                 node = chosen.node,
                 socksPort = 1080,
+                smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
                 splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
                 blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
                 isTestMode = false
@@ -217,10 +294,10 @@ class BypassVpnService : VpnService() {
             return
         }
 
-        // Стандартный MTU 1500 для стабильной работы UDP-звонков в Telegram и WhatsApp
+        // MTU 1400 предотвращает фрагментацию пакетов внутри VLESS и ускоряет YouTube/звонки
         val builder = Builder()
             .setSession("MyBypassXray")
-            .setMtu(1500)
+            .setMtu(1400)
             .addAddress("10.10.10.2", 32)
             .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
@@ -259,7 +336,7 @@ class BypassVpnService : VpnService() {
         tproxyConfig.writeText(
             """
             tunnel:
-              mtu: 1500
+              mtu: 1400
               ipv4: 10.10.10.2
             socks5:
               port: 1080
@@ -282,7 +359,8 @@ class BypassVpnService : VpnService() {
             activeServerName = serverName
             updateNotification(serverName)
             notifyState(applicationContext)
-            log("VPN активен! Сервер: $serverName")
+            val modeStr = if (ServerScanner.isSmartBypassEnabled(applicationContext)) "Умный обход + FakeDNS" else "Полный VPN"
+            log("VPN активен [$modeStr]: $serverName")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
             stopTunnelInternal(stopService = true)
@@ -410,8 +488,8 @@ class BypassVpnService : VpnService() {
         const val ACTION_STOP = "com.mybypass.app.STOP"
         const val ACTION_AUTO_CONNECT = "com.mybypass.app.AUTO_CONNECT"
         const val ACTION_RESCAN_AND_CONNECT = "com.mybypass.app.RESCAN_AND_CONNECT"
-        const val EXTRA_CONFIG_JSON = "extra_config_json"
-        const val EXTRA_SERVER_NAME = "extra_server_name"
+        const val EXTRA_VLESS_URI = "extra_vless_uri"
+        const val EXTRA_SKIP_CHECK = "extra_skip_check"
         const val EXTRA_BLOCK_IPV6 = "extra_block_ipv6"
 
         private const val LOG_FILE_NAME = "last_log.txt"
@@ -490,7 +568,7 @@ class BypassVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
             }
-            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск + Подкл.», чтобы подобрать самый быстрый сервер со всеми ИИ и приложениями." }
+            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать быстрый сервер с Gemini и ИИ." }
         }
 
         @Synchronized
