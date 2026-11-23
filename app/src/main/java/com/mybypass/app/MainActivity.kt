@@ -33,8 +33,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var selectedServerView: TextView
     private lateinit var toggleBtn: Button
     private lateinit var findBtn: Button
+    private lateinit var nextBtn: Button
     private lateinit var listBtn: Button
     private lateinit var subInput: EditText
+    private lateinit var smartBypassCheck: CheckBox
     private lateinit var aiCountryCheck: CheckBox
     private lateinit var splitRuCheck: CheckBox
     private lateinit var blockQuicCheck: CheckBox
@@ -45,26 +47,28 @@ class MainActivity : AppCompatActivity() {
     private var workingNodes: MutableList<TestedNode> = mutableListOf()
     private var selectedTested: TestedNode? = null
     private var pendingServiceAction: String? = null
+    private var pendingSkipCheck: Boolean = false
 
     private val subPresets = listOf(
-        "ВСЕ сразу (5 баз)" to ServerScanner.ALL_FREE_URLS.joinToString("\n"),
-        "Igareck Полная" to ServerScanner.ALL_FREE_URLS[0],
-        "Igareck Мобильная" to ServerScanner.ALL_FREE_URLS[1],
-        "Reality Белые списки" to ServerScanner.ALL_FREE_URLS[2],
-        "Kort0881 (1000+)" to ServerScanner.ALL_FREE_URLS[3],
-        "Patterniha Топ" to ServerScanner.ALL_FREE_URLS[4]
+        "ВСЕ (5 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
+        "Только РФ-базы (4)" to VlessParser.ALL_FREE_URLS.take(4).joinToString("\n"),
+        "Igareck РФ" to VlessParser.ALL_FREE_URLS[0],
+        "Reality Белые" to VlessParser.ALL_FREE_URLS[2],
+        "Patterniha" to VlessParser.ALL_FREE_URLS[3]
     )
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val action = pendingServiceAction
+        val skip = pendingSkipCheck
         pendingServiceAction = null
+        pendingSkipCheck = false
         if (result.resultCode == Activity.RESULT_OK) {
             when (action) {
                 BypassVpnService.ACTION_AUTO_CONNECT,
                 BypassVpnService.ACTION_RESCAN_AND_CONNECT -> sendServiceAction(action)
-                else -> startSelectedVpn()
+                else -> startSelectedVpn(skip)
             }
         } else {
             BypassVpnService.log("Пользователь отклонил разрешение на VPN.")
@@ -94,7 +98,7 @@ class MainActivity : AppCompatActivity() {
         outerScroll.addView(root)
 
         val title = TextView(this).apply {
-            text = "MyBypass Xray (VLESS)"
+            text = "MyBypass Xray v4.2 (VLESS)"
             textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
@@ -131,18 +135,18 @@ class MainActivity : AppCompatActivity() {
                     savePrefs()
                     val input = subInput.text.toString().trim()
                     if (input.startsWith("vless://", ignoreCase = true) && !input.contains('\n')) {
-                        val parsed = VlessParser.parseVlessUri(input)
+                        val parsed = VlessParser.parseVlessUri(input, isCuratedSource = true)
                         if (parsed != null) {
                             val manual = TestedNode(node = parsed, pingMs = -1L)
                             selectedTested = manual
                             ServerScanner.saveSelectedNode(this@MainActivity, manual)
                             refreshSelectedLabel()
-                            requestVpnAndRun(BypassVpnService.ACTION_START)
+                            requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = true)
                         } else {
                             Toast.makeText(this@MainActivity, "Неверный формат ссылки vless://", Toast.LENGTH_SHORT).show()
                         }
                     } else if (selectedTested != null) {
-                        requestVpnAndRun(BypassVpnService.ACTION_START)
+                        requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
                     } else {
                         requestVpnAndRun(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
                     }
@@ -154,7 +158,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        root.addView(sectionLabel("Базы бесплатных серверов GitHub или свой ключ vless://"))
+        root.addView(sectionLabel("Базы бесплатных серверов GitHub (5 баз) или свой ключ vless://"))
 
         val subScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -189,9 +193,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         findBtn = Button(this).apply {
-            text = "Автопоиск + Подкл."
+            text = "Автопоиск"
             isAllCaps = false
-            textSize = 13f
+            textSize = 12.5f
+            setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
             background = roundedBg("#1565C0", dp(8).toFloat())
             setOnClickListener {
@@ -200,17 +205,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        nextBtn = Button(this).apply {
+            text = "Следующий"
+            isAllCaps = false
+            textSize = 12.5f
+            setTextColor(Color.WHITE)
+            background = roundedBg("#455A64", dp(8).toFloat())
+            setOnClickListener { switchToNextServer() }
+        }
+
         listBtn = Button(this).apply {
             isAllCaps = false
-            textSize = 13f
+            textSize = 12.5f
             setTextColor(Color.WHITE)
             background = roundedBg("#37474F", dp(8).toFloat())
             setOnClickListener { showServerPickerDialog() }
         }
 
-        actionRow.addView(findBtn, LinearLayout.LayoutParams(0, dp(42), 1.3f).apply { marginEnd = dp(6) })
-        actionRow.addView(listBtn, LinearLayout.LayoutParams(0, dp(42), 1.2f).apply { marginStart = dp(6) })
+        actionRow.addView(findBtn, LinearLayout.LayoutParams(0, dp(42), 1.15f).apply { marginEnd = dp(4) })
+        actionRow.addView(nextBtn, LinearLayout.LayoutParams(0, dp(42), 0.95f).apply { marginStart = dp(4); marginEnd = dp(4) })
+        actionRow.addView(listBtn, LinearLayout.LayoutParams(0, dp(42), 1.25f).apply { marginStart = dp(4) })
         root.addView(actionRow)
+
+        smartBypassCheck = CheckBox(this).apply {
+            text = "Умный обход + FakeDNS (быстрее: только ИИ, YT, Meta, TG, Discord через VPN)"
+            isChecked = ServerScanner.isSmartBypassEnabled(this@MainActivity)
+            setTextColor(Color.parseColor("#A5D6A7"))
+            textSize = 13f
+            setOnCheckedChangeListener { _, _ -> savePrefs() }
+        }
+        root.addView(smartBypassCheck)
 
         aiCountryCheck = CheckBox(this).apply {
             text = "Фильтр под ИИ: исключить РФ, РБ, Китай и Гонконг"
@@ -231,7 +255,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(splitRuCheck)
 
         blockQuicCheck = CheckBox(this).apply {
-            text = "Блокировать QUIC — стабильные YouTube, Meta и звонки"
+            text = "Блокировать QUIC — стабильные Google, YouTube и Meta"
             isChecked = ServerScanner.isBlockQuicEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
@@ -317,10 +341,27 @@ class MainActivity : AppCompatActivity() {
         requestVpnAndRun(autoAction)
     }
 
+    private fun switchToNextServer() {
+        workingNodes = ServerScanner.loadWorkingList(this)
+        if (workingNodes.size <= 1) {
+            savePrefs()
+            requestVpnAndRun(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
+            return
+        }
+        val idx = workingNodes.indexOfFirst { it.node.rawUri == selectedTested?.node?.rawUri }
+        val nextIdx = if (idx >= 0) (idx + 1) % workingNodes.size else 0
+        val chosen = workingNodes[nextIdx]
+        selectedTested = chosen
+        ServerScanner.saveSelectedNode(this, chosen)
+        refreshSelectedLabel()
+        BypassVpnService.log("Переключение на сервер #${nextIdx + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+        requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
+    }
+
     private fun showServerPickerDialog() {
         workingNodes = ServerScanner.loadWorkingList(this)
         if (workingNodes.isEmpty()) {
-            Toast.makeText(this, "Список пуст. Нажмите «Автопоиск + Подкл.»", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Список пуст. Нажмите «Автопоиск»", Toast.LENGTH_SHORT).show()
             return
         }
         val items = workingNodes.mapIndexed { idx, tested ->
@@ -328,14 +369,14 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Серверы (${workingNodes.size}) — сначала ВСЕ сервисы")
+            .setTitle("Серверы (${workingNodes.size}) — сначала с Gemini")
             .setItems(items) { _, which ->
                 val chosen = workingNodes[which]
                 selectedTested = chosen
                 ServerScanner.saveSelectedNode(this, chosen)
                 refreshSelectedLabel()
                 BypassVpnService.log("Выбран сервер #${which + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
-                requestVpnAndRun(BypassVpnService.ACTION_START)
+                requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
             }
             .setNegativeButton("Закрыть", null)
             .show()
@@ -345,7 +386,7 @@ class MainActivity : AppCompatActivity() {
         val current = selectedTested
         val idx = workingNodes.indexOfFirst { it.node.rawUri == current?.node?.rawUri }
         selectedServerView.text = if (current == null) {
-            "Сервер не выбран. Нажмите «Автопоиск + Подкл.»."
+            "Сервер не выбран. Нажмите «Автопоиск»."
         } else {
             val poolStr = if (idx >= 0 && workingNodes.isNotEmpty()) " [${idx + 1}/${workingNodes.size}]" else ""
             val pingStr = if (current.pingMs >= 0) " • ${current.pingMs} мс" else ""
@@ -353,17 +394,19 @@ class MainActivity : AppCompatActivity() {
             "Сервер$poolStr: $cc${current.node.name}\n" +
                 "${current.capabilitiesTag()} • ${current.node.security}/${current.node.network}$pingStr"
         }
-        val fullCount = workingNodes.count { it.allWork }
-        listBtn.text = if (fullCount > 0) {
-            "Список (${workingNodes.size} | ВСЕ: $fullCount)"
+        val gemCount = workingNodes.count { it.geminiOk }
+        listBtn.text = if (workingNodes.isNotEmpty()) {
+            "Список (${workingNodes.size} | Gem:$gemCount)"
         } else {
-            "Список (${workingNodes.size})"
+            "Список (0)"
         }
+        nextBtn.isEnabled = workingNodes.size > 1 && !BypassVpnService.isAutoSearching
     }
 
     private fun savePrefs() {
         getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).edit()
             .putString("sub_url", subInput.text.toString().trim())
+            .putBoolean("smart_bypass", smartBypassCheck.isChecked)
             .putBoolean("ai_country_filter", aiCountryCheck.isChecked)
             .putBoolean("split_ru", splitRuCheck.isChecked)
             .putBoolean("block_quic", blockQuicCheck.isChecked)
@@ -396,7 +439,7 @@ class MainActivity : AppCompatActivity() {
                 if (progress.isNotBlank()) {
                     findBtn.text = progress
                 } else {
-                    findBtn.text = "Автопоиск + Подкл."
+                    findBtn.text = "Автопоиск"
                 }
             }
         }
@@ -419,16 +462,17 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
     }
 
-    private fun requestVpnAndRun(action: String) {
+    private fun requestVpnAndRun(action: String, skipCheck: Boolean = false) {
         val prepIntent = VpnService.prepare(this)
         if (prepIntent != null) {
             pendingServiceAction = action
+            pendingSkipCheck = skipCheck
             vpnPermissionLauncher.launch(prepIntent)
         } else {
             when (action) {
                 BypassVpnService.ACTION_AUTO_CONNECT,
                 BypassVpnService.ACTION_RESCAN_AND_CONNECT -> sendServiceAction(action)
-                else -> startSelectedVpn()
+                else -> startSelectedVpn(skipCheck)
             }
         }
     }
@@ -444,22 +488,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startSelectedVpn() {
+    private fun startSelectedVpn(skipCheck: Boolean) {
         val tested = selectedTested ?: run {
             sendServiceAction(BypassVpnService.ACTION_RESCAN_AND_CONNECT)
             return
         }
-        val configJson = VlessParser.buildXrayConfig(
-            node = tested.node,
-            socksPort = 1080,
-            splitRu = splitRuCheck.isChecked,
-            blockQuic = blockQuicCheck.isChecked,
-            isTestMode = false
-        )
         val intent = Intent(this, BypassVpnService::class.java).apply {
             action = BypassVpnService.ACTION_START
-            putExtra(BypassVpnService.EXTRA_CONFIG_JSON, configJson)
-            putExtra(BypassVpnService.EXTRA_SERVER_NAME, tested.shortTitle())
+            putExtra(BypassVpnService.EXTRA_VLESS_URI, tested.node.rawUri)
+            putExtra(BypassVpnService.EXTRA_SKIP_CHECK, skipCheck)
             putExtra(BypassVpnService.EXTRA_BLOCK_IPV6, blockIpv6Check.isChecked)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -482,11 +519,12 @@ class MainActivity : AppCompatActivity() {
 
         when {
             searching -> {
-                statusView.text = "● Автопоиск: ${BypassVpnService.searchStatusText.ifBlank { "сканирование..." }}"
+                statusView.text = "● ${BypassVpnService.searchStatusText.ifBlank { "поиск и проверка..." }}"
                 statusView.setTextColor(Color.parseColor("#FFB74D"))
-                toggleBtn.text = "ОТМЕНИТЬ ПОИСК"
+                toggleBtn.text = "ОТМЕНИТЬ"
                 toggleBtn.background = roundedBg("#E65100", dp(12).toFloat())
                 findBtn.isEnabled = false
+                nextBtn.isEnabled = false
             }
             running -> {
                 val srv = BypassVpnService.activeServerName.ifBlank { selectedTested?.shortTitle().orEmpty() }
@@ -495,7 +533,8 @@ class MainActivity : AppCompatActivity() {
                 toggleBtn.text = "ОСТАНОВИТЬ VPN"
                 toggleBtn.background = roundedBg("#C62828", dp(12).toFloat())
                 findBtn.isEnabled = true
-                findBtn.text = "Автопоиск + Подкл."
+                findBtn.text = "Автопоиск"
+                nextBtn.isEnabled = workingNodes.size > 1
             }
             else -> {
                 statusView.text = "○ Отключено"
@@ -503,11 +542,13 @@ class MainActivity : AppCompatActivity() {
                 toggleBtn.text = "ЗАПУСТИТЬ VPN"
                 toggleBtn.background = roundedBg("#2E7D32", dp(12).toFloat())
                 findBtn.isEnabled = true
-                findBtn.text = "Автопоиск + Подкл."
+                findBtn.text = "Автопоиск"
+                nextBtn.isEnabled = workingNodes.size > 1
             }
         }
         toggleBtn.gravity = Gravity.CENTER
         val editable = !running && !searching
+        smartBypassCheck.isEnabled = editable
         splitRuCheck.isEnabled = editable
         blockQuicCheck.isEnabled = editable
         blockIpv6Check.isEnabled = editable
