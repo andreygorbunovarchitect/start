@@ -110,7 +110,8 @@ object ServerScanner {
         if (saved.contains("mahdibland", true) ||
             saved.contains("githubmirror/clean", true) ||
             saved.contains("Epodonios", true) ||
-            saved.contains("V2ray-Config/", false)
+            saved.contains("V2ray-Config/", false) ||
+            (!saved.contains("WHITE-SNI-RU-all.txt", true) && saved.contains("igareck/", true) && saved.contains("kort0881/", true))
         ) {
             val fresh = getDefaultSubText()
             prefs.edit().putString("sub_url", fresh).apply()
@@ -218,6 +219,26 @@ object ServerScanner {
         return list.firstOrNull()
     }
 
+    /** Отсеиваем IP Cloudflare CDN, к которым ТСПУ в РФ сбрасывает соединения (Connection reset) */
+    private fun isBlockedCdnIp(host: String): Boolean {
+        val parts = host.split('.')
+        if (parts.size != 4) return false
+        val a = parts[0].toIntOrNull() ?: return false
+        val b = parts[1].toIntOrNull() ?: return false
+        return when {
+            a == 104 && b in 16..31 -> true
+            a == 172 && b in 64..71 -> true
+            a == 188 && b == 114 -> true
+            a == 162 && (b == 158 || b == 159) -> true
+            a == 141 && b == 101 -> true
+            a == 190 && b == 93 -> true
+            a == 197 && b == 234 -> true
+            a == 198 && b == 41 -> true
+            a == 131 && b == 0 -> true
+            else -> false
+        }
+    }
+
     fun quickLiveCheckNode(context: Context, node: VlessNode, tempPort: Int): Long {
         val xrayBin = File(context.applicationInfo.nativeLibraryDir, "libxray.so")
         if (!xrayBin.exists()) return -1L
@@ -320,8 +341,8 @@ object ServerScanner {
 
             if (cancelFlag.get()) return emptyList()
 
-            var uniqueNodes = allParsed.values.toList()
-            BypassVpnService.log("Всего уникальных VLESS: ${uniqueNodes.size}")
+            var uniqueNodes = allParsed.values.filterNot { isBlockedCdnIp(it.host) }
+            BypassVpnService.log("Всего уникальных VLESS (без Cloudflare): ${uniqueNodes.size}")
 
             if (filterAiCountries) {
                 val before = uniqueNodes.size
@@ -334,8 +355,6 @@ object ServerScanner {
                 return emptyList()
             }
 
-            // 100% ключей из отобранных РФ-баз (igareck/patterniha) идут первыми,
-            // затем reality/tcp с xtls-rprx-vision из больших баз, затем остальные reality/tcp
             val curatedNodes = uniqueNodes.filter { it.isCurated }.shuffled()
             val aggVisionReality = uniqueNodes.filter {
                 !it.isCurated && it.security == "reality" &&
@@ -349,7 +368,7 @@ object ServerScanner {
                 !it.isCurated && !(it.security == "reality" && (it.network == "tcp" || it.network == "raw"))
             }.shuffled().take(60)
 
-            val candidates = (curatedNodes + aggVisionReality + aggTcpReality + aggOther).take(550)
+            val candidates = (curatedNodes + aggVisionReality + aggTcpReality + aggOther).take(560)
 
             notifyProgress("TCP-пинг ${candidates.size} узлов...")
             BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} узлов (${curatedNodes.size} из РФ-баз в приоритете)...")
