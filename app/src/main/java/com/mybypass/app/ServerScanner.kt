@@ -39,8 +39,8 @@ data class TestedNode(
         get() = geminiOk && flowOk && gptOk && ytOk && metaOk && tgOk && waOk
 
     fun priorityTier(): Int {
-        val fast = pingMs in 1..1800
-        val medium = pingMs in 1..4200
+        val fast = pingMs in 1..2200
+        val medium = pingMs in 1..5500
         return when {
             fast && isTcpReality && allWork -> 0
             medium && isTcpReality && geminiOk && gptOk && ytOk && metaOk -> 1
@@ -111,7 +111,7 @@ object ServerScanner {
             saved.contains("githubmirror/clean", true) ||
             saved.contains("Epodonios", true) ||
             saved.contains("V2ray-Config/", false) ||
-            (!saved.contains("WHITE-SNI-RU-all.txt", true) && saved.contains("igareck/", true) && saved.contains("kort0881/", true))
+            saved.contains("WHITE-SNI-RU-all.txt", true)
         ) {
             val fresh = getDefaultSubText()
             prefs.edit().putString("sub_url", fresh).apply()
@@ -219,7 +219,6 @@ object ServerScanner {
         return list.firstOrNull()
     }
 
-    /** Отсеиваем IP Cloudflare CDN, к которым ТСПУ в РФ сбрасывает соединения (Connection reset) */
     private fun isBlockedCdnIp(host: String): Boolean {
         val parts = host.split('.')
         if (parts.size != 4) return false
@@ -266,7 +265,7 @@ object ServerScanner {
             if (!portReady) return -1L
 
             val start = System.currentTimeMillis()
-            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 3200, readBody = false)
+            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 4200, readBody = false)
             if (resp != null && resp.code in 200..399) {
                 (System.currentTimeMillis() - start).coerceAtLeast(1L)
             } else {
@@ -341,8 +340,9 @@ object ServerScanner {
 
             if (cancelFlag.get()) return emptyList()
 
-            var uniqueNodes = allParsed.values.filterNot { isBlockedCdnIp(it.host) }
-            BypassVpnService.log("Всего уникальных VLESS (без Cloudflare): ${uniqueNodes.size}")
+            // Для отобранных РФ-баз не вырезаем CDN-адреса, фильтр только для больших внешних баз
+            var uniqueNodes = allParsed.values.filter { it.isCurated || !isBlockedCdnIp(it.host) }
+            BypassVpnService.log("Всего уникальных VLESS: ${uniqueNodes.size}")
 
             if (filterAiCountries) {
                 val before = uniqueNodes.size
@@ -405,6 +405,7 @@ object ServerScanner {
             val gemCount = AtomicInteger(0)
             val doneCount = AtomicInteger(0)
             val portCounter = AtomicInteger(10830)
+            val firstCuratedErr = AtomicReference<String?>(null)
             val firstDiagErr = AtomicReference<String?>(null)
 
             val xrayPool = Executors.newFixedThreadPool(8)
@@ -428,6 +429,9 @@ object ServerScanner {
                             notifyProgress("Найдено: ${verified.size} (Gemini: ${gemCount.get()})")
                         } else {
                             if (!diagErr.isNullOrBlank()) {
+                                if (node.isCurated) {
+                                    firstCuratedErr.compareAndSet(null, diagErr)
+                                }
                                 firstDiagErr.compareAndSet(null, diagErr)
                             }
                             if (done % 15 == 0) {
@@ -445,7 +449,7 @@ object ServerScanner {
 
             if (verified.isEmpty()) {
                 BypassVpnService.log("Рабочих серверов не найдено. Нажмите поиск ещё раз.")
-                firstDiagErr.get()?.let { err ->
+                (firstCuratedErr.get() ?: firstDiagErr.get())?.let { err ->
                     BypassVpnService.log("Диагностика теста: $err")
                 }
                 return emptyList()
@@ -504,15 +508,15 @@ object ServerScanner {
             if (!portReady) return Pair(null, "xray не открыл порт $tempPort")
 
             val pingStart = System.currentTimeMillis()
-            val (baseResp, getErr) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 4200, readBody = false)
+            val (baseResp, getErr) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 5500, readBody = false)
             if (baseResp == null || baseResp.code !in 200..399) {
                 return Pair(null, "base test (${node.host}): ${getErr ?: "HTTP ${baseResp?.code}"}")
             }
             val pingMs = (System.currentTimeMillis() - pingStart).coerceAtLeast(1L)
-            if (pingMs > 4200L || cancelFlag.get()) return Pair(null, "slow (${pingMs}ms)")
+            if (pingMs > 5500L || cancelFlag.get()) return Pair(null, "slow (${pingMs}ms)")
 
             var countryCode = ""
-            val (traceResp, _) = socks5hHttpsGet(tempPort, "chatgpt.com", "/cdn-cgi/trace", 2500, readBody = true)
+            val (traceResp, _) = socks5hHttpsGet(tempPort, "chatgpt.com", "/cdn-cgi/trace", 2800, readBody = true)
             if (traceResp != null && traceResp.code == 200) {
                 val match = Regex("loc=([A-Za-z]{2})").find(traceResp.body)
                 if (match != null) countryCode = match.groupValues[1].uppercase()
@@ -522,7 +526,7 @@ object ServerScanner {
             val gptOk = if (badGeo) {
                 false
             } else {
-                val (gptResp, _) = socks5hHttpsGet(tempPort, "api.openai.com", "/v1/models", 2600, readBody = true)
+                val (gptResp, _) = socks5hHttpsGet(tempPort, "api.openai.com", "/v1/models", 2800, readBody = true)
                 if (gptResp == null) {
                     false
                 } else {
@@ -536,7 +540,7 @@ object ServerScanner {
             val geminiOk = if (badGeo) {
                 false
             } else {
-                val (gemResp, _) = socks5hHttpsGet(tempPort, "gemini.google.com", "/app", 3000, readBody = true)
+                val (gemResp, _) = socks5hHttpsGet(tempPort, "gemini.google.com", "/app", 3200, readBody = true)
                 if (gemResp == null) {
                     false
                 } else {
@@ -556,7 +560,7 @@ object ServerScanner {
                         else -> false
                     }
                     if (pageOk) {
-                        val (apiResp, _) = socks5hHttpsGet(tempPort, "waa-pa.clients6.google.com", "/", 2500, readBody = false)
+                        val (apiResp, _) = socks5hHttpsGet(tempPort, "waa-pa.clients6.google.com", "/", 2600, readBody = false)
                         apiResp != null && apiResp.code in 200..499
                     } else {
                         false
@@ -567,7 +571,7 @@ object ServerScanner {
             val flowOk = if (badGeo) {
                 false
             } else {
-                val (flowResp, _) = socks5hHttpsGet(tempPort, "labs.google", "/fx/tools/flow", 2600, readBody = true)
+                val (flowResp, _) = socks5hHttpsGet(tempPort, "labs.google", "/fx/tools/flow", 2800, readBody = true)
                 if (flowResp == null) {
                     false
                 } else {
@@ -587,19 +591,19 @@ object ServerScanner {
                 }
             }
 
-            val (ytResp, _) = socks5hHttpsGet(tempPort, "www.youtube.com", "/generate_204", 2400, readBody = false)
+            val (ytResp, _) = socks5hHttpsGet(tempPort, "www.youtube.com", "/generate_204", 2600, readBody = false)
             val ytOk = ytResp != null && (
                 ytResp.code == 204 ||
                     (ytResp.code in 200..399 && !ytResp.location.lowercase().contains("/sorry"))
                 )
 
-            val (metaResp, _) = socks5hHttpsGet(tempPort, "www.instagram.com", "/", 2500, readBody = false)
+            val (metaResp, _) = socks5hHttpsGet(tempPort, "www.instagram.com", "/", 2600, readBody = false)
             val metaOk = metaResp != null && metaResp.code in 200..399
 
-            val (tgResp, _) = socks5hHttpsGet(tempPort, "api.telegram.org", "/", 2200, readBody = false)
+            val (tgResp, _) = socks5hHttpsGet(tempPort, "api.telegram.org", "/", 2400, readBody = false)
             val tgOk = tgResp != null && tgResp.code in 200..404
 
-            val (waResp, _) = socks5hHttpsGet(tempPort, "web.whatsapp.com", "/", 2200, readBody = false)
+            val (waResp, _) = socks5hHttpsGet(tempPort, "web.whatsapp.com", "/", 2400, readBody = false)
             val waOk = waResp != null && waResp.code in 200..399
 
             if (!geminiOk && !flowOk && !gptOk && !ytOk && !metaOk && !tgOk && !waOk) {
