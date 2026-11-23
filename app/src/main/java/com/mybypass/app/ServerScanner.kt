@@ -107,7 +107,6 @@ object ServerScanner {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val saved = prefs.getString("sub_url", "").orEmpty()
         if (saved.isBlank()) return getDefaultSubText()
-        // Автозамена устаревших 404-ссылок на актуальные рабочие базы
         if (saved.contains("mahdibland", true) ||
             saved.contains("githubmirror/clean", true) ||
             saved.contains("Epodonios", true) ||
@@ -172,18 +171,27 @@ object ServerScanner {
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 val node = VlessParser.parseVlessUri(obj.optString("uri")) ?: continue
+                val gemini = obj.optBoolean("gemini", false)
+                val flow = obj.optBoolean("flow", false)
+                val gpt = obj.optBoolean("gpt", false)
+                val yt = obj.optBoolean("yt", false)
+                val meta = obj.optBoolean("meta", false)
+                val tg = obj.optBoolean("tg", false)
+                val wa = obj.optBoolean("wa", false)
+                // Пропускаем пустые "(Базовый)" записи из старого кэша
+                if (!gemini && !flow && !gpt && !yt && !meta && !tg && !wa) continue
                 result.add(
                     TestedNode(
                         node = node,
                         pingMs = obj.optLong("ping", 999L),
                         countryCode = obj.optString("cc", ""),
-                        geminiOk = obj.optBoolean("gemini", false),
-                        flowOk = obj.optBoolean("flow", false),
-                        gptOk = obj.optBoolean("gpt", false),
-                        ytOk = obj.optBoolean("yt", false),
-                        metaOk = obj.optBoolean("meta", false),
-                        tgOk = obj.optBoolean("tg", false),
-                        waOk = obj.optBoolean("wa", false)
+                        geminiOk = gemini,
+                        flowOk = flow,
+                        gptOk = gpt,
+                        ytOk = yt,
+                        metaOk = meta,
+                        tgOk = tg,
+                        waOk = wa
                     )
                 )
             }
@@ -207,14 +215,6 @@ object ServerScanner {
         val list = loadWorkingList(context)
         if (uri.isNotBlank()) {
             list.firstOrNull { it.node.rawUri == uri }?.let { return it }
-            val parsed = VlessParser.parseVlessUri(uri)
-            if (parsed != null) {
-                return TestedNode(
-                    node = parsed,
-                    pingMs = prefs.getLong("selected_ping", -1L),
-                    countryCode = prefs.getString("selected_cc", "").orEmpty()
-                )
-            }
         }
         return list.firstOrNull()
     }
@@ -575,6 +575,11 @@ object ServerScanner {
 
             val (waResp, _) = socks5hHttpsGet(tempPort, "web.whatsapp.com", "/", 2200, readBody = false)
             val waOk = waResp != null && waResp.code in 200..399
+
+            // Отсеиваем пустые "(Базовый)" серверы, на которых не открылся ни один реальный сервис
+            if (!geminiOk && !flowOk && !gptOk && !ytOk && !metaOk && !tgOk && !waOk) {
+                return Pair(null, "no services open on ${node.host}")
+            }
 
             Pair(
                 TestedNode(
