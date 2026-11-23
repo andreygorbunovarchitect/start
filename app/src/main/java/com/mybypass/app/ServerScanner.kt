@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -108,9 +109,9 @@ object ServerScanner {
         val saved = prefs.getString("sub_url", "").orEmpty()
         if (saved.isBlank()) return getDefaultSubText()
         if (saved.contains("mahdibland", true) ||
-            saved.contains("githubmirror/clean", true) ||
+            saved.contains("kort0881", true) ||
+            saved.contains("barry-far", true) ||
             saved.contains("Epodonios", true) ||
-            saved.contains("V2ray-Config/", false) ||
             saved.contains("WHITE-SNI-RU-all.txt", true)
         ) {
             val fresh = getDefaultSubText()
@@ -219,25 +220,6 @@ object ServerScanner {
         return list.firstOrNull()
     }
 
-    private fun isBlockedCdnIp(host: String): Boolean {
-        val parts = host.split('.')
-        if (parts.size != 4) return false
-        val a = parts[0].toIntOrNull() ?: return false
-        val b = parts[1].toIntOrNull() ?: return false
-        return when {
-            a == 104 && b in 16..31 -> true
-            a == 172 && b in 64..71 -> true
-            a == 188 && b == 114 -> true
-            a == 162 && (b == 158 || b == 159) -> true
-            a == 141 && b == 101 -> true
-            a == 190 && b == 93 -> true
-            a == 197 && b == 234 -> true
-            a == 198 && b == 41 -> true
-            a == 131 && b == 0 -> true
-            else -> false
-        }
-    }
-
     fun quickLiveCheckNode(context: Context, node: VlessNode, tempPort: Int): Long {
         val xrayBin = File(context.applicationInfo.nativeLibraryDir, "libxray.so")
         if (!xrayBin.exists()) return -1L
@@ -340,8 +322,7 @@ object ServerScanner {
 
             if (cancelFlag.get()) return emptyList()
 
-            // Для отобранных РФ-баз не вырезаем CDN-адреса, фильтр только для больших внешних баз
-            var uniqueNodes = allParsed.values.filter { it.isCurated || !isBlockedCdnIp(it.host) }
+            var uniqueNodes = allParsed.values.toList()
             BypassVpnService.log("Всего уникальных VLESS: ${uniqueNodes.size}")
 
             if (filterAiCountries) {
@@ -356,39 +337,27 @@ object ServerScanner {
             }
 
             val curatedNodes = uniqueNodes.filter { it.isCurated }.shuffled()
-            val aggVisionReality = uniqueNodes.filter {
-                !it.isCurated && it.security == "reality" &&
-                    (it.network == "tcp" || it.network == "raw") && it.flow.isNotBlank()
-            }.shuffled().take(240)
-            val aggTcpReality = uniqueNodes.filter {
-                !it.isCurated && it.security == "reality" &&
-                    (it.network == "tcp" || it.network == "raw") && it.flow.isBlank()
-            }.shuffled().take(160)
-            val aggOther = uniqueNodes.filter {
-                !it.isCurated && !(it.security == "reality" && (it.network == "tcp" || it.network == "raw"))
-            }.shuffled().take(60)
-
-            val candidates = (curatedNodes + aggVisionReality + aggTcpReality + aggOther).take(560)
+            val otherNodes = uniqueNodes.filter { !it.isCurated }.shuffled().take(150)
+            val candidates = (curatedNodes + otherNodes).take(250)
 
             notifyProgress("TCP-пинг ${candidates.size} узлов...")
             BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} узлов (${curatedNodes.size} из РФ-баз в приоритете)...")
-            val tcpPool = Executors.newFixedThreadPool(45)
+            val tcpPool = Executors.newFixedThreadPool(16)
             val tcpAlive = try {
                 val futures = candidates.map { node ->
                     tcpPool.submit(Callable {
                         if (cancelFlag.get()) return@Callable null
-                        val ping = tcpPing(node.host, node.port, 1200)
-                        if (ping in 0..1000) node to ping else null
+                        val ping = tcpPing(node.host, node.port, 2200)
+                        if (ping in 0..2200) node to ping else null
                     })
                 }
                 futures.mapNotNull {
                     try { it.get() } catch (_: Exception) { null }
                 }.sortedBy { (node, ping) ->
                     var score = ping
-                    if (!node.isCurated) score += 600L
+                    if (!node.isCurated) score += 1000L
                     val isTcpR = node.security == "reality" && (node.network == "tcp" || node.network == "raw")
                     if (!isTcpR) score += 250L
-                    if (node.flow.isBlank()) score += 100L
                     score
                 }
             } finally {
@@ -399,7 +368,7 @@ object ServerScanner {
             BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Тестирую Gemini (с API), Flow, GPT, YT, Meta...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            val maxVerify = minOf(tcpAlive.size, 150)
+            val maxVerify = minOf(tcpAlive.size, 120)
             val toVerify = tcpAlive.take(maxVerify)
             val verified = Collections.synchronizedList(mutableListOf<TestedNode>())
             val gemCount = AtomicInteger(0)
@@ -408,7 +377,7 @@ object ServerScanner {
             val firstCuratedErr = AtomicReference<String?>(null)
             val firstDiagErr = AtomicReference<String?>(null)
 
-            val xrayPool = Executors.newFixedThreadPool(8)
+            val xrayPool = Executors.newFixedThreadPool(6)
             try {
                 val tasks = toVerify.map { (node, _) ->
                     xrayPool.submit {
@@ -434,7 +403,7 @@ object ServerScanner {
                                 }
                                 firstDiagErr.compareAndSet(null, diagErr)
                             }
-                            if (done % 15 == 0) {
+                            if (done % 10 == 0) {
                                 notifyProgress("Тест $done/$maxVerify (Gemini: ${gemCount.get()})")
                             }
                         }
@@ -783,10 +752,12 @@ object ServerScanner {
     }
 
     fun tcpPing(host: String, port: Int, timeoutMs: Int): Long {
-        val start = System.currentTimeMillis()
         return try {
+            // Резолвим DNS до запуска таймера, чтобы задержка DNS не отбрасывала доменные серверы
+            val addr = InetAddress.getByName(host)
+            val start = System.currentTimeMillis()
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), timeoutMs)
+                socket.connect(InetSocketAddress(addr, port), timeoutMs)
             }
             System.currentTimeMillis() - start
         } catch (_: Exception) {
