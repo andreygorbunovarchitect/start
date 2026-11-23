@@ -178,7 +178,6 @@ object ServerScanner {
                 val meta = obj.optBoolean("meta", false)
                 val tg = obj.optBoolean("tg", false)
                 val wa = obj.optBoolean("wa", false)
-                // Пропускаем пустые "(Базовый)" записи из старого кэша
                 if (!gemini && !flow && !gpt && !yt && !meta && !tg && !wa) continue
                 result.add(
                     TestedNode(
@@ -335,19 +334,26 @@ object ServerScanner {
                 return emptyList()
             }
 
+            // 100% ключей из отобранных РФ-баз (igareck/patterniha) идут первыми,
+            // затем reality/tcp с xtls-rprx-vision из больших баз, затем остальные reality/tcp
             val curatedNodes = uniqueNodes.filter { it.isCurated }.shuffled()
+            val aggVisionReality = uniqueNodes.filter {
+                !it.isCurated && it.security == "reality" &&
+                    (it.network == "tcp" || it.network == "raw") && it.flow.isNotBlank()
+            }.shuffled().take(240)
             val aggTcpReality = uniqueNodes.filter {
-                !it.isCurated && it.security == "reality" && (it.network == "tcp" || it.network == "raw")
-            }.shuffled().take(260)
+                !it.isCurated && it.security == "reality" &&
+                    (it.network == "tcp" || it.network == "raw") && it.flow.isBlank()
+            }.shuffled().take(160)
             val aggOther = uniqueNodes.filter {
                 !it.isCurated && !(it.security == "reality" && (it.network == "tcp" || it.network == "raw"))
             }.shuffled().take(60)
 
-            val candidates = (curatedNodes + aggTcpReality + aggOther).take(520)
+            val candidates = (curatedNodes + aggVisionReality + aggTcpReality + aggOther).take(550)
 
             notifyProgress("TCP-пинг ${candidates.size} узлов...")
             BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} узлов (${curatedNodes.size} из РФ-баз в приоритете)...")
-            val tcpPool = Executors.newFixedThreadPool(40)
+            val tcpPool = Executors.newFixedThreadPool(45)
             val tcpAlive = try {
                 val futures = candidates.map { node ->
                     tcpPool.submit(Callable {
@@ -360,9 +366,10 @@ object ServerScanner {
                     try { it.get() } catch (_: Exception) { null }
                 }.sortedBy { (node, ping) ->
                     var score = ping
-                    if (!node.isCurated) score += 350L
+                    if (!node.isCurated) score += 600L
                     val isTcpR = node.security == "reality" && (node.network == "tcp" || node.network == "raw")
                     if (!isTcpR) score += 250L
+                    if (node.flow.isBlank()) score += 100L
                     score
                 }
             } finally {
@@ -373,7 +380,7 @@ object ServerScanner {
             BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Тестирую Gemini (с API), Flow, GPT, YT, Meta...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            val maxVerify = minOf(tcpAlive.size, 110)
+            val maxVerify = minOf(tcpAlive.size, 150)
             val toVerify = tcpAlive.take(maxVerify)
             val verified = Collections.synchronizedList(mutableListOf<TestedNode>())
             val gemCount = AtomicInteger(0)
@@ -381,7 +388,7 @@ object ServerScanner {
             val portCounter = AtomicInteger(10830)
             val firstDiagErr = AtomicReference<String?>(null)
 
-            val xrayPool = Executors.newFixedThreadPool(6)
+            val xrayPool = Executors.newFixedThreadPool(8)
             try {
                 val tasks = toVerify.map { (node, _) ->
                     xrayPool.submit {
@@ -404,7 +411,7 @@ object ServerScanner {
                             if (!diagErr.isNullOrBlank()) {
                                 firstDiagErr.compareAndSet(null, diagErr)
                             }
-                            if (done % 10 == 0) {
+                            if (done % 15 == 0) {
                                 notifyProgress("Тест $done/$maxVerify (Gemini: ${gemCount.get()})")
                             }
                         }
@@ -576,7 +583,6 @@ object ServerScanner {
             val (waResp, _) = socks5hHttpsGet(tempPort, "web.whatsapp.com", "/", 2200, readBody = false)
             val waOk = waResp != null && waResp.code in 200..399
 
-            // Отсеиваем пустые "(Базовый)" серверы, на которых не открылся ни один реальный сервис
             if (!geminiOk && !flowOk && !gptOk && !ytOk && !metaOk && !tgOk && !waOk) {
                 return Pair(null, "no services open on ${node.host}")
             }
