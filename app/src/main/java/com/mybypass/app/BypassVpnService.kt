@@ -230,10 +230,17 @@ class BypassVpnService : VpnService() {
         startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgNode, verifiedWarp != null, tgDirect)
 
         if (isRunning && WarpManager.isWarpEnabled(applicationContext) && WarpManager.loadSavedAccount(applicationContext) == null) {
+            val genAtStart = commandGen.get()
             Thread {
                 val created = WarpManager.getOrRegister(applicationContext, 1080)
-                if (created != null) {
-                    log("Cloudflare WARP зарегистрирован (${created.ipv4}) — будет использоваться поверх релея.")
+                if (created != null && isRunning && genAtStart == commandGen.get()) {
+                    log("Cloudflare WARP зарегистрирован (${created.ipv4}) -> подключаю поверх релея...")
+                    executor.execute {
+                        if (isRunning && genAtStart == commandGen.get()) {
+                            stopTunnelInternal(stopService = false)
+                            applyNodeConfig(target, blockIpv6)
+                        }
+                    }
                 }
             }.apply { isDaemon = true }.start()
         }
