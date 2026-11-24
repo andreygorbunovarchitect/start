@@ -1,5 +1,7 @@
 package com.mybypass.app
 
+import android.content.Context
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -7,31 +9,86 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 object LocalDpiProxy {
 
     val PROFILE_NAMES = listOf(
-        "DPI 1: Split на границе SNI (рекомендуется)",
-        "DPI 2: Split + Disorder (обратный порядок)",
-        "DPI 3: Фрагментация по 2 байта",
-        "DPI 4: Через VLESS-прокси (если DPI режет фрагментацию)"
+        "DPI 1: Нативный ByeDPI Split + TLS-Rec (рекомендуется)",
+        "DPI 2: Нативный ByeDPI Disorder + OOB",
+        "DPI 3: Нативный ByeDPI Агрессивный (Fake + Split)",
+        "DPI 4: Через зарубежный прокси-поток #2 (без DPI)"
     )
 
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
+    private var nativeProcess: Process? = null
     private val pool = Executors.newCachedThreadPool()
 
     var currentProfile: Int = 0
         private set
 
+    var isUsingNativeBinary: Boolean = false
+        private set
+
     fun isRunning(): Boolean = running.get()
 
-    fun start(port: Int = 1081, profileIndex: Int = 0): Boolean {
+    fun start(context: Context, port: Int = 1081, profileIndex: Int = 0): Boolean {
         stop()
         currentProfile = profileIndex.coerceIn(0, PROFILE_NAMES.lastIndex)
         if (currentProfile == 3) return false
 
+        val nativeBin = File(context.applicationInfo.nativeLibraryDir, "libciadpi.so")
+        if (nativeBin.exists() && startNativeCiadpi(nativeBin, port, currentProfile)) {
+            isUsingNativeBinary = true
+            running.set(true)
+            return true
+        }
+
+        isUsingNativeBinary = false
+        return startJavaFallback(port)
+    }
+
+    private fun startNativeCiadpi(bin: File, port: Int, profile: Int): Boolean {
+        val args = when (profile) {
+            0 -> listOf(
+                bin.absolutePath, "-i", "127.0.0.1", "-p", port.toString(),
+                "--split", "1", "--tlsrec", "1+s", "--auto=torst"
+            )
+            1 -> listOf(
+                bin.absolutePath, "-i", "127.0.0.1", "-p", port.toString(),
+                "--disorder", "1", "--oob", "1", "--auto=torst"
+            )
+            else -> listOf(
+                bin.absolutePath, "-i", "127.0.0.1", "-p", port.toString(),
+                "--fake", "-1", "--ttl", "8", "--split", "1+s", "--disorder", "3",
+                "--auto=torst,redirect,ssl_err"
+            )
+        }
+
+        return try {
+            val proc = ProcessBuilder(args)
+                .redirectErrorStream(true)
+                .start()
+            nativeProcess = proc
+
+            for (i in 0 until 10) {
+                if (!proc.isAlive) return false
+                if (ServerScanner.tcpPing("127.0.0.1", port, 80) >= 0) {
+                    return true
+                }
+                Thread.sleep(60)
+            }
+            stopNativeProcess()
+            false
+        } catch (_: Exception) {
+            stopNativeProcess()
+            false
+        }
+    }
+
+    private fun startJavaFallback(port: Int): Boolean {
         return try {
             val ss = ServerSocket()
             ss.reuseAddress = true
@@ -60,11 +117,28 @@ object LocalDpiProxy {
 
     fun stop() {
         running.set(false)
+        isUsingNativeBinary = false
+        stopNativeProcess()
         try {
             serverSocket?.close()
         } catch (_: Exception) {
         }
         serverSocket = null
+    }
+
+    private fun stopNativeProcess() {
+        val p = nativeProcess
+        nativeProcess = null
+        if (p != null) {
+            try { p.destroy() } catch (_: Exception) {}
+            try {
+                if (!p.waitFor(120, TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly()
+                }
+            } catch (_: Exception) {
+                try { p.destroyForcibly() } catch (_: Exception) {}
+            }
+        }
     }
 
     private fun handleClient(client: Socket) {
@@ -79,8 +153,6 @@ object LocalDpiProxy {
 
             if (firstByte == 0x05) {
                 handleSocks5(input, output) { sock -> remote = sock }
-            } else {
-                handleHttpConnect(firstByte, input, output) { sock -> remote = sock }
             }
         } catch (_: Exception) {
         } finally {
@@ -138,7 +210,23 @@ object LocalDpiProxy {
         if (!readFully(input, portBuf, 2)) return
         val targetPort = ((portBuf[0].toInt() and 0xFF) shl 8) or (portBuf[1].toInt() and 0xFF)
 
-        val remote = connectDirect(targetHost, targetPort)
+        if (targetHost.startsWith("198.18.") || targetHost.startsWith("198.19.")) {
+            output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+            output.flush()
+            return
+        }
+
+        val remote = try {
+            val addr = InetAddress.getByName(targetHost)
+            Socket().apply {
+                tcpNoDelay = true
+                soTimeout = 25000
+                connect(InetSocketAddress(addr, targetPort), 6000)
+            }
+        } catch (_: Exception) {
+            null
+        }
+
         if (remote == null) {
             output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
@@ -149,84 +237,26 @@ object LocalDpiProxy {
         output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0))
         output.flush()
 
-        relayWithDesync(input, output, remote, currentProfile)
-    }
-
-    private fun handleHttpConnect(
-        firstByte: Int,
-        input: InputStream,
-        output: OutputStream,
-        onConnected: (Socket) -> Unit
-    ) {
-        val sb = StringBuilder()
-        sb.append(firstByte.toChar())
-        var prev = firstByte
-        while (sb.length < 8192) {
-            val b = input.read()
-            if (b == -1) break
-            sb.append(b.toChar())
-            if (prev == '\n'.code && b == '\n'.code) break
-            if (sb.endsWith("\r\n\r\n")) break
-            prev = b
-        }
-
-        val firstLine = sb.toString().lineSequence().firstOrNull().orEmpty()
-        val parts = firstLine.split(' ')
-        if (parts.size < 2 || !parts[0].equals("CONNECT", true)) return
-
-        val authority = parts[1].substringBefore('/')
-        val colonIdx = authority.lastIndexOf(':')
-        val targetHost = if (colonIdx > 0) authority.substring(0, colonIdx) else authority
-        val targetPort = if (colonIdx > 0) authority.substring(colonIdx + 1).toIntOrNull() ?: 443 else 443
-
-        val remote = connectDirect(targetHost, targetPort)
-        if (remote == null) {
-            output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
-            output.flush()
-            return
-        }
-        onConnected(remote)
-
-        output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
-        output.flush()
-
-        relayWithDesync(input, output, remote, currentProfile)
-    }
-
-    private fun connectDirect(host: String, port: Int): Socket? {
-        if (host.startsWith("198.18.") || host.startsWith("198.19.")) return null
-        return try {
-            val addr = InetAddress.getByName(host)
-            val sock = Socket()
-            sock.tcpNoDelay = true
-            sock.soTimeout = 25000
-            sock.connect(InetSocketAddress(addr, port), 6000)
-            sock
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun relayWithDesync(
-        cIn: InputStream,
-        cOut: OutputStream,
-        remote: Socket,
-        profile: Int
-    ) {
         val rIn = remote.getInputStream()
         val rOut = remote.getOutputStream()
 
         val upThread = Thread {
             try {
                 val firstBuf = ByteArray(4096)
-                val firstRead = cIn.read(firstBuf)
-                if (firstRead > 0) {
-                    writeDesyncedChunk(rOut, firstBuf, firstRead, profile)
+                val firstRead = input.read(firstBuf)
+                if (firstRead > 2) {
+                    rOut.write(firstBuf, 0, 2)
+                    rOut.flush()
+                    Thread.sleep(6)
+                    rOut.write(firstBuf, 2, firstRead - 2)
+                    rOut.flush()
+                } else if (firstRead > 0) {
+                    rOut.write(firstBuf, 0, firstRead)
+                    rOut.flush()
                 }
-
                 val buf = ByteArray(16384)
                 while (true) {
-                    val n = cIn.read(buf)
+                    val n = input.read(buf)
                     if (n <= 0) break
                     rOut.write(buf, 0, n)
                     rOut.flush()
@@ -243,12 +273,12 @@ object LocalDpiProxy {
                 while (true) {
                     val n = rIn.read(buf)
                     if (n <= 0) break
-                    cOut.write(buf, 0, n)
-                    cOut.flush()
+                    output.write(buf, 0, n)
+                    output.flush()
                 }
             } catch (_: Exception) {
             } finally {
-                try { cOut.flush() } catch (_: Exception) {}
+                try { output.flush() } catch (_: Exception) {}
             }
         }.apply { isDaemon = true }
 
@@ -256,71 +286,6 @@ object LocalDpiProxy {
         downThread.start()
         upThread.join(60000)
         downThread.join(60000)
-    }
-
-    private fun writeDesyncedChunk(out: OutputStream, data: ByteArray, len: Int, profile: Int) {
-        if (len <= 6) {
-            out.write(data, 0, len)
-            out.flush()
-            return
-        }
-
-        when (profile) {
-            0 -> {
-                val sniPos = findSniOffset(data, len)
-                if (sniPos > 5 && sniPos + 3 < len) {
-                    out.write(data, 0, 2)
-                    out.flush()
-                    Thread.sleep(6)
-                    out.write(data, 2, sniPos - 2)
-                    out.flush()
-                    Thread.sleep(6)
-                    out.write(data, sniPos, len - sniPos)
-                    out.flush()
-                } else {
-                    val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
-                    out.write(data, 0, splitAt)
-                    out.flush()
-                    Thread.sleep(8)
-                    out.write(data, splitAt, len - splitAt)
-                    out.flush()
-                }
-            }
-            1 -> {
-                val splitAt = minOf(5, len / 2)
-                out.write(data, splitAt, len - splitAt)
-                out.flush()
-                Thread.sleep(8)
-                out.write(data, 0, splitAt)
-                out.flush()
-            }
-            else -> {
-                var offset = 0
-                while (offset < len) {
-                    val step = minOf(2, len - offset)
-                    out.write(data, offset, step)
-                    out.flush()
-                    offset += step
-                    if (offset < len && offset < 96) Thread.sleep(3)
-                }
-            }
-        }
-    }
-
-    private fun findSniOffset(data: ByteArray, len: Int): Int {
-        if (len < 45 || (data[0].toInt() and 0xFF) != 0x16 || (data[1].toInt() and 0xFF) != 0x03) {
-            return -1
-        }
-        for (i in 40 until len - 9) {
-            if (data[i] == 0x00.toByte() && data[i + 1] == 0x00.toByte()) {
-                val nameType = data[i + 6].toInt() and 0xFF
-                val nameLen = ((data[i + 7].toInt() and 0xFF) shl 8) or (data[i + 8].toInt() and 0xFF)
-                if (nameType == 0x00 && nameLen in 4..253 && i + 9 + nameLen <= len) {
-                    return i + 9 + (nameLen / 2)
-                }
-            }
-        }
-        return -1
     }
 
     private fun readFully(input: InputStream, buf: ByteArray, length: Int): Boolean {
