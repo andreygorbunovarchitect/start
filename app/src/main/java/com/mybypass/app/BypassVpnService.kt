@@ -25,10 +25,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class BypassVpnService : VpnService() {
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val commandGen = AtomicInteger(0)
     private var watchdog: ScheduledExecutorService? = null
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
@@ -44,8 +46,11 @@ class BypassVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         initLogger(applicationContext)
+        val gen = commandGen.incrementAndGet()
+
         when (intent?.action) {
             ACTION_START -> {
+                ServerScanner.cancelScan()
                 val rawUri = intent.getStringExtra(EXTRA_VLESS_URI).orEmpty()
                 val skipCheck = intent.getBooleanExtra(EXTRA_SKIP_CHECK, false)
                 val blockIpv6 = intent.getBooleanExtra(EXTRA_BLOCK_IPV6, false)
@@ -56,7 +61,8 @@ class BypassVpnService : VpnService() {
                 notifyState(applicationContext)
 
                 executor.execute {
-                    handleStartWithPrecheck(rawUri, skipCheck, blockIpv6)
+                    if (gen != commandGen.get()) return@execute
+                    handleStartWithPrecheck(gen, rawUri, skipCheck, blockIpv6)
                 }
             }
 
@@ -67,7 +73,8 @@ class BypassVpnService : VpnService() {
                 notifyState(applicationContext)
 
                 executor.execute {
-                    handleAutoConnect(forceRescan = false)
+                    if (gen != commandGen.get()) return@execute
+                    handleAutoConnect(gen, forceRescan = false)
                 }
             }
 
@@ -78,7 +85,8 @@ class BypassVpnService : VpnService() {
                 notifyState(applicationContext)
 
                 executor.execute {
-                    handleAutoConnect(forceRescan = true)
+                    if (gen != commandGen.get()) return@execute
+                    handleAutoConnect(gen, forceRescan = true)
                 }
             }
 
@@ -94,7 +102,6 @@ class BypassVpnService : VpnService() {
         return START_STICKY
     }
 
-    // Улучшение 2: умный сторож (раз в 60 сек, таймаут 5 сек, 3 сбоя подряд, замена только на узел с Gemini)
     private fun startWatchdog(blockIpv6: Boolean) {
         stopWatchdog()
         consecutiveWatchdogFails = 0
@@ -154,7 +161,6 @@ class BypassVpnService : VpnService() {
         watchdog = null
     }
 
-    /** Подбираем до 2 дополнительных живых серверов для Потока #2 (YouTube) и Потока #3 (Telegram) */
     private fun pickAuxiliaryStreamNodes(
         primary: VlessNode,
         needMedia: Boolean,
@@ -197,10 +203,19 @@ class BypassVpnService : VpnService() {
             needTg = !tgDirect
         )
 
+        var verifiedWarp: WarpAccount? = null
+        if (WarpManager.isWarpEnabled(applicationContext)) {
+            val acc = WarpManager.loadSavedAccount(applicationContext)
+            if (acc != null && WarpManager.verifyWarpOverRelay(applicationContext, target.node, acc, 10829)) {
+                verifiedWarp = acc
+            }
+        }
+
         val configJson = VlessParser.buildXrayConfig(
             node = target.node,
             mediaNode = mediaNode,
             tgNode = tgNode,
+            warpAccount = verifiedWarp,
             socksPort = 1080,
             smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
             splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
@@ -212,12 +227,22 @@ class BypassVpnService : VpnService() {
         )
         val label = target.shortTitle()
         updateNotification(label)
-        startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgNode, tgDirect)
+        startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgNode, verifiedWarp != null, tgDirect)
+
+        if (isRunning && WarpManager.isWarpEnabled(applicationContext) && WarpManager.loadSavedAccount(applicationContext) == null) {
+            Thread {
+                val created = WarpManager.getOrRegister(applicationContext, 1080)
+                if (created != null) {
+                    log("Cloudflare WARP зарегистрирован (${created.ipv4}) — будет использоваться поверх релея.")
+                }
+            }.apply { isDaemon = true }.start()
+        }
     }
 
-    private fun handleStartWithPrecheck(rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
+    private fun handleStartWithPrecheck(gen: Int, rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
         try {
             stopTunnelInternal(stopService = false)
+            if (gen != commandGen.get()) return
 
             var target = ServerScanner.loadSelectedNode(applicationContext)
             if (rawUri.isNotBlank() && target?.node?.rawUri != rawUri) {
@@ -228,7 +253,7 @@ class BypassVpnService : VpnService() {
             }
 
             if (target == null) {
-                handleAutoConnect(forceRescan = true)
+                handleAutoConnect(gen, forceRescan = true)
                 return
             }
 
@@ -239,12 +264,15 @@ class BypassVpnService : VpnService() {
                 log("Проверка потока #1: ${target.shortTitle()}...")
 
                 val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824, timeoutMs = 3500)
+                if (gen != commandGen.get()) return
+
                 if (livePing < 0) {
                     log("Узел #1 не отвечает. Ищу живой в списке...")
                     val savedList = ServerScanner.loadWorkingList(applicationContext)
                     var replacement: TestedNode? = null
                     var checked = 0
                     for (cand in savedList) {
+                        if (gen != commandGen.get()) return
                         if (cand.node.rawUri == target.node.rawUri) continue
                         if (checked >= 6) break
                         checked++
@@ -261,7 +289,7 @@ class BypassVpnService : VpnService() {
                         log("Переключился на живой узел: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
                     } else {
                         log("Живых сохранённых узлов нет -> запускаю свежий автопоиск...")
-                        handleAutoConnect(forceRescan = true)
+                        handleAutoConnect(gen, forceRescan = true)
                         return
                     }
                 } else {
@@ -271,21 +299,25 @@ class BypassVpnService : VpnService() {
                 }
             }
 
+            if (gen != commandGen.get()) return
             isAutoSearching = false
             searchStatusText = ""
             applyNodeConfig(target, blockIpv6)
             if (isRunning) startWatchdog(blockIpv6)
         } catch (e: Throwable) {
-            isAutoSearching = false
-            searchStatusText = ""
-            log("ОШИБКА запуска: ${Log.getStackTraceString(e)}")
-            stopTunnelInternal(stopService = true)
+            if (gen == commandGen.get()) {
+                isAutoSearching = false
+                searchStatusText = ""
+                log("ОШИБКА запуска: ${Log.getStackTraceString(e)}")
+                stopTunnelInternal(stopService = true)
+            }
         }
     }
 
-    private fun handleAutoConnect(forceRescan: Boolean) {
+    private fun handleAutoConnect(gen: Int, forceRescan: Boolean) {
         try {
             stopTunnelInternal(stopService = false)
+            if (gen != commandGen.get()) return
 
             var chosen: TestedNode? = null
 
@@ -299,6 +331,7 @@ class BypassVpnService : VpnService() {
                     log("Проверка сохранённого узла: ${preferred.shortTitle()}...")
 
                     val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825, timeoutMs = 3500)
+                    if (gen != commandGen.get()) return
                     if (livePing > 0) {
                         chosen = preferred.copy(pingMs = livePing)
                         ServerScanner.saveSelectedNode(applicationContext, chosen)
@@ -312,11 +345,13 @@ class BypassVpnService : VpnService() {
             if (chosen == null) {
                 val prevListener = ServerScanner.onProgressListener
                 ServerScanner.onProgressListener = { progress ->
-                    searchStatusText = progress
-                    if (progress.isNotBlank()) {
-                        updateNotification(progress)
+                    if (gen == commandGen.get()) {
+                        searchStatusText = progress
+                        if (progress.isNotBlank()) {
+                            updateNotification(progress)
+                        }
+                        notifyState(applicationContext)
                     }
-                    notifyState(applicationContext)
                     prevListener?.invoke(progress)
                 }
                 val found = try {
@@ -324,6 +359,7 @@ class BypassVpnService : VpnService() {
                 } finally {
                     ServerScanner.onProgressListener = prevListener
                 }
+                if (gen != commandGen.get()) return
                 chosen = found.firstOrNull()
             }
 
@@ -340,10 +376,12 @@ class BypassVpnService : VpnService() {
             applyNodeConfig(chosen, blockIpv6)
             if (isRunning) startWatchdog(blockIpv6)
         } catch (e: Throwable) {
-            isAutoSearching = false
-            searchStatusText = ""
-            log("ОШИБКА автоподключения: ${Log.getStackTraceString(e)}")
-            stopTunnelInternal(stopService = true)
+            if (gen == commandGen.get()) {
+                isAutoSearching = false
+                searchStatusText = ""
+                log("ОШИБКА автоподключения: ${Log.getStackTraceString(e)}")
+                stopTunnelInternal(stopService = true)
+            }
         }
     }
 
@@ -355,6 +393,7 @@ class BypassVpnService : VpnService() {
         dpiProfile: Int,
         mediaNode: VlessNode?,
         tgNode: VlessNode?,
+        warpActive: Boolean,
         tgDirect: Boolean
     ) {
         if (configJson.isBlank()) {
@@ -364,7 +403,7 @@ class BypassVpnService : VpnService() {
         }
 
         if (useLocalDpi) {
-            LocalDpiProxy.start(port = 1081, profileIndex = dpiProfile)
+            LocalDpiProxy.start(applicationContext, port = 1081, profileIndex = dpiProfile)
         }
 
         val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
@@ -489,7 +528,9 @@ class BypassVpnService : VpnService() {
             updateNotification(serverName)
             notifyState(applicationContext)
 
+            val aiChannel = if (warpActive) "WARP -> $serverName" else serverName
             val ytChannel = when {
+                useLocalDpi && LocalDpiProxy.isUsingNativeBinary -> "Нативный ByeDPI (C)"
                 useLocalDpi -> "Локальный DPI"
                 mediaNode != null -> "Поток #2 (${mediaNode.name.take(14)})"
                 else -> "Поток #1"
@@ -500,7 +541,7 @@ class BypassVpnService : VpnService() {
                 mediaNode != null -> "Поток #2"
                 else -> "Поток #1"
             }
-            log("Потоки разделены:\n • Поток #1 (ИИ/Meta): $serverName\n • Поток #2 (YouTube): $ytChannel\n • Поток #3 (Telegram): $tgChannel")
+            log("Потоки разделены:\n • Поток #1 (ИИ/Google): $aiChannel\n • Поток #2 (YouTube): $ytChannel\n • Поток #3 (Telegram): $tgChannel")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
             stopTunnelInternal(stopService = true)
