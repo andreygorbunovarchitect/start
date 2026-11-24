@@ -147,8 +147,8 @@ class BypassVpnService : VpnService() {
             isAutoSearching = false
             searchStatusText = ""
 
-            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext)
             val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
+            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
             val configJson = VlessParser.buildXrayConfig(
                 node = target.node,
                 socksPort = 1080,
@@ -223,8 +223,8 @@ class BypassVpnService : VpnService() {
                 return
             }
 
-            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext)
             val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
+            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
             val configJson = VlessParser.buildXrayConfig(
                 node = chosen.node,
                 socksPort = 1080,
@@ -316,7 +316,7 @@ class BypassVpnService : VpnService() {
         }
 
         val builder = Builder()
-            .setSession("MyBypassXray")
+            .setSession("VPN дяди Андрея")
             .setMtu(1400)
             .addAddress("10.10.10.2", 32)
             .addRoute("0.0.0.0", 0)
@@ -380,7 +380,7 @@ class BypassVpnService : VpnService() {
             updateNotification(serverName)
             notifyState(applicationContext)
             val modeStr = if (ServerScanner.isSmartBypassEnabled(applicationContext)) "Умный обход + FakeDNS" else "Полный VPN"
-            log("VPN активен [$modeStr]: $serverName")
+            log("VPN дяди Андрея активен [$modeStr]: $serverName")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
             stopTunnelInternal(stopService = true)
@@ -458,7 +458,7 @@ class BypassVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "MyBypassXray",
+                "VPN дяди Андрея",
                 NotificationManager.IMPORTANCE_LOW
             )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -479,7 +479,7 @@ class BypassVpnService : VpnService() {
         }
 
         return builder
-            .setContentTitle(if (isAutoSearching) "MyBypass — Автоподбор" else "MyBypass Xray активен")
+            .setContentTitle(if (isAutoSearching) "VPN дяди Андрея — Подбор" else "VPN дяди Андрея")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(openIntent)
