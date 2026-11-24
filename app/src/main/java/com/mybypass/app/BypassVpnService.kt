@@ -22,14 +22,18 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class BypassVpnService : VpnService() {
 
     private val executor = Executors.newSingleThreadExecutor()
+    private var watchdog: ScheduledExecutorService? = null
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
     private var tproxyStarted = false
+    private var currentActiveNode: TestedNode? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -88,6 +92,45 @@ class BypassVpnService : VpnService() {
         return START_STICKY
     }
 
+    private fun startWatchdog(blockIpv6: Boolean) {
+        stopWatchdog()
+        val sched = Executors.newSingleThreadScheduledExecutor()
+        watchdog = sched
+        sched.scheduleWithFixedDelay({
+            try {
+                if (!isRunning || isAutoSearching) return@scheduleWithFixedDelay
+                val active = currentActiveNode ?: return@scheduleWithFixedDelay
+                val ping = ServerScanner.quickLiveCheckNode(applicationContext, active.node, 10828)
+                if (ping < 0 && isRunning) {
+                    log("Сторож: текущий узел просел/упал -> ищу живую замену...")
+                    val list = ServerScanner.loadWorkingList(applicationContext)
+                    val next = list.firstOrNull { it.node.rawUri != active.node.rawUri }
+                    if (next != null) {
+                        val np = ServerScanner.quickLiveCheckNode(applicationContext, next.node, 10828)
+                        if (np > 0) {
+                            val updated = next.copy(pingMs = np)
+                            ServerScanner.saveSelectedNode(applicationContext, updated)
+                            executor.execute {
+                                if (isRunning) {
+                                    applyNodeConfig(updated, blockIpv6)
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }, 25L, 25L, TimeUnit.SECONDS)
+    }
+
+    private fun stopWatchdog() {
+        try {
+            watchdog?.shutdownNow()
+        } catch (_: Exception) {
+        }
+        watchdog = null
+    }
+
     private fun pickVerifiedMediaNode(primary: VlessNode): VlessNode? {
         val list = ServerScanner.loadWorkingList(applicationContext)
         val candidates = list
@@ -105,6 +148,30 @@ class BypassVpnService : VpnService() {
     private fun isTgDirectEnabled(): Boolean =
         applicationContext.getSharedPreferences(ServerScanner.PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean("tg_direct", false)
+
+    private fun applyNodeConfig(target: TestedNode, blockIpv6: Boolean) {
+        currentActiveNode = target
+        val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
+        val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
+        val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(target.node) else null
+        val tgDirect = isTgDirectEnabled()
+
+        val configJson = VlessParser.buildXrayConfig(
+            node = target.node,
+            mediaNode = mediaNode,
+            socksPort = 1080,
+            smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
+            splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
+            blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
+            useLocalDpi = useLocalDpi,
+            dpiPort = 1081,
+            tgDirect = tgDirect,
+            isTestMode = false
+        )
+        val label = target.shortTitle()
+        updateNotification(label)
+        startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgDirect)
+    }
 
     private fun handleStartWithPrecheck(rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
         try {
@@ -164,27 +231,8 @@ class BypassVpnService : VpnService() {
 
             isAutoSearching = false
             searchStatusText = ""
-
-            val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
-            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
-            val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(target.node) else null
-            val tgDirect = isTgDirectEnabled()
-
-            val configJson = VlessParser.buildXrayConfig(
-                node = target.node,
-                mediaNode = mediaNode,
-                socksPort = 1080,
-                smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
-                splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
-                blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
-                useLocalDpi = useLocalDpi,
-                dpiPort = 1081,
-                tgDirect = tgDirect,
-                isTestMode = false
-            )
-            val label = target.shortTitle()
-            updateNotification(label)
-            startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgDirect)
+            applyNodeConfig(target, blockIpv6)
+            startWatchdog(blockIpv6)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -246,26 +294,9 @@ class BypassVpnService : VpnService() {
                 return
             }
 
-            val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
-            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
-            val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(chosen.node) else null
-            val tgDirect = isTgDirectEnabled()
-
-            val configJson = VlessParser.buildXrayConfig(
-                node = chosen.node,
-                mediaNode = mediaNode,
-                socksPort = 1080,
-                smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
-                splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
-                blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
-                useLocalDpi = useLocalDpi,
-                dpiPort = 1081,
-                tgDirect = tgDirect,
-                isTestMode = false
-            )
-            val label = chosen.shortTitle()
-            updateNotification(label)
-            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext), useLocalDpi, dpiProfile, mediaNode, tgDirect)
+            val blockIpv6 = ServerScanner.isBlockIpv6Enabled(applicationContext)
+            applyNodeConfig(chosen, blockIpv6)
+            startWatchdog(blockIpv6)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -410,9 +441,9 @@ class BypassVpnService : VpnService() {
             val ytChannel = when {
                 useLocalDpi -> "Локальный DPI"
                 mediaNode != null -> mediaNode.name.take(16)
-                else -> "Основной VLESS"
+                else -> "Основной прокси"
             }
-            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через VLESS"
+            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через прокси"
             log("Каналы разделены: ИИ/Meta -> $serverName | YouTube -> $ytChannel | Telegram -> $tgChannel")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
@@ -421,6 +452,7 @@ class BypassVpnService : VpnService() {
     }
 
     private fun stopTunnelInternal(stopService: Boolean) {
+        if (stopService) stopWatchdog()
         LocalDpiProxy.stop()
 
         if (tproxyStarted) {
@@ -446,6 +478,7 @@ class BypassVpnService : VpnService() {
         val wasRunning = isRunning
         isRunning = false
         activeServerName = ""
+        currentActiveNode = null
 
         if (stopService) {
             isAutoSearching = false
@@ -528,6 +561,7 @@ class BypassVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopWatchdog()
         ServerScanner.cancelScan()
         executor.execute {
             if (isRunning || tunInterface != null || xrayProcess != null || LocalDpiProxy.isRunning()) {
