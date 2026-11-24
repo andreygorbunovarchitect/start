@@ -36,6 +36,18 @@ data class VlessNode(
 object VlessParser {
 
     private val SUPPORTED_NETWORKS = setOf("tcp", "raw", "ws", "grpc", "xhttp", "splithttp", "httpupgrade")
+    private val SUPPORTED_SECURITY = setOf("none", "tls", "reality")
+    private val SUPPORTED_FLOWS = setOf("", "xtls-rprx-vision", "xtls-rprx-vision-udp443")
+    private val SUPPORTED_SS_METHODS = setOf(
+        "aes-128-gcm",
+        "aes-256-gcm",
+        "chacha20-ietf-poly1305",
+        "chacha20-poly1305",
+        "xchacha20-ietf-poly1305",
+        "2022-blake3-aes-128-gcm",
+        "2022-blake3-aes-256-gcm",
+        "2022-blake3-chacha20-poly1305"
+    )
 
     private val GEO_BLOCKED_FLAGS = listOf("🇷🇺", "🇧🇾", "🇨🇳", "🇭🇰", "🇮🇷", "🇰🇵")
     private val GEO_BLOCKED_WORDS = Regex(
@@ -68,7 +80,8 @@ object VlessParser {
         "domain:ytimg.com",
         "domain:youtube-nocookie.com",
         "domain:yt.be",
-        "domain:ggpht.com"
+        "domain:ggpht.com",
+        "domain:youtubei.googleapis.com"
     )
 
     val TELEGRAM_DOMAINS = listOf(
@@ -152,11 +165,14 @@ object VlessParser {
         "domain:challenges.cloudflare.com",
         "domain:instagram.com",
         "domain:cdninstagram.com",
+        "domain:igcdn.com",
         "domain:threads.net",
         "domain:threads.com",
         "domain:facebook.com",
+        "domain:facebook.net",
         "domain:fb.com",
         "domain:fb.me",
+        "domain:fb.gg",
         "domain:fbcdn.net",
         "domain:fbsbx.com",
         "domain:messenger.com",
@@ -273,6 +289,28 @@ object VlessParser {
         }
     }
 
+    private fun isValidRealityParams(pbk: String, sid: String): Boolean {
+        val cleanPbk = pbk.trim()
+        if (cleanPbk.length !in 42..44) return false
+        val decoded = try {
+            Base64.decode(cleanPbk, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        } catch (_: Exception) {
+            try {
+                Base64.decode(cleanPbk, Base64.DEFAULT)
+            } catch (_: Exception) {
+                return false
+            }
+        }
+        if (decoded.size != 32) return false
+
+        val cleanSid = sid.trim()
+        if (cleanSid.isNotEmpty()) {
+            if (cleanSid.length > 16 || cleanSid.length % 2 != 0) return false
+            if (!cleanSid.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return false
+        }
+        return true
+    }
+
     private fun parseVlessInternal(trimmed: String, isCuratedSource: Boolean): VlessNode? {
         val body = trimmed.substring(8)
         val hashIdx = body.indexOf('#')
@@ -287,15 +325,24 @@ object VlessParser {
         if (atIdx <= 0) return null
         val uuid = safeDecode(authority.substring(0, atIdx), plusAsSpace = false).trim()
         val (host, port) = splitHostPort(authority.substring(atIdx + 1).trim()) ?: return null
-        if (uuid.isEmpty()) return null
+        if (uuid.isEmpty() || uuid.any { it.isWhitespace() }) return null
 
         val params = parseQueryParams(queryStr)
         val network = (params["type"] ?: "tcp").lowercase().let { if (it == "raw") "tcp" else it }
         if (network !in SUPPORTED_NETWORKS) return null
 
         val security = (params["security"] ?: "none").lowercase()
-        val pbk = params["pbk"] ?: ""
-        if (security == "reality" && pbk.isBlank()) return null
+        if (security !in SUPPORTED_SECURITY) return null
+
+        val pbk = params["pbk"].orEmpty().trim()
+        val sid = params["sid"].orEmpty().trim()
+        if (security == "reality" && !isValidRealityParams(pbk, sid)) return null
+
+        val encryption = params["encryption"].orEmpty().ifBlank { "none" }
+        if (encryption != "none") return null
+
+        val rawFlow = params["flow"].orEmpty().trim()
+        val flow = if (rawFlow in SUPPORTED_FLOWS) rawFlow else ""
 
         val name = safeDecode(rawName, plusAsSpace = true).trim().ifEmpty { "$host:$port" }
         val allowInsecure = params["allowinsecure"] == "1" ||
@@ -308,14 +355,14 @@ object VlessParser {
             uuid = uuid,
             host = host,
             port = port,
-            encryption = params["encryption"].orEmpty().ifBlank { "none" },
-            flow = params["flow"].orEmpty(),
+            encryption = encryption,
+            flow = flow,
             security = security,
             network = network,
             sni = params["sni"] ?: params["servername"] ?: "",
             fingerprint = params["fp"].orEmpty().ifBlank { "chrome" },
             publicKey = pbk,
-            shortId = params["sid"].orEmpty(),
+            shortId = sid,
             spiderX = params["spx"].orEmpty(),
             path = params["path"].orEmpty().ifBlank { "/" },
             headerHost = params["host"].orEmpty(),
@@ -350,6 +397,12 @@ object VlessParser {
         if (network !in SUPPORTED_NETWORKS) return null
 
         val security = (params["security"] ?: "tls").lowercase()
+        if (security !in SUPPORTED_SECURITY) return null
+
+        val pbk = params["pbk"].orEmpty().trim()
+        val sid = params["sid"].orEmpty().trim()
+        if (security == "reality" && !isValidRealityParams(pbk, sid)) return null
+
         val name = safeDecode(rawName, plusAsSpace = true).trim().ifEmpty { "[TJ] $host:$port" }
         val allowInsecure = params["allowinsecure"] == "1" ||
             params["allowinsecure"].equals("true", true) ||
@@ -367,8 +420,8 @@ object VlessParser {
             network = network,
             sni = params["sni"] ?: params["peer"] ?: "",
             fingerprint = params["fp"].orEmpty().ifBlank { "chrome" },
-            publicKey = params["pbk"].orEmpty(),
-            shortId = params["sid"].orEmpty(),
+            publicKey = pbk,
+            shortId = sid,
             spiderX = params["spx"].orEmpty(),
             path = params["path"].orEmpty().ifBlank { "/" },
             headerHost = params["host"].orEmpty(),
@@ -388,8 +441,11 @@ object VlessParser {
         val hashIdx = body.indexOf('#')
         val beforeHash = if (hashIdx >= 0) body.substring(0, hashIdx) else body
         val rawName = if (hashIdx >= 0) body.substring(hashIdx + 1) else ""
-        val noQuery = beforeHash.substringBefore('?')
 
+        // Xray не поддерживает внешние SIP003-плагины
+        if (beforeHash.contains("plugin=", ignoreCase = true)) return null
+
+        val noQuery = beforeHash.substringBefore('?')
         val atIdx = noQuery.lastIndexOf('@')
         if (atIdx <= 0) return null
 
@@ -404,9 +460,14 @@ object VlessParser {
 
         val colon = decodedUser.indexOf(':')
         if (colon <= 0) return null
-        val method = decodedUser.substring(0, colon).trim()
+        val method = decodedUser.substring(0, colon).trim().lowercase()
         val password = decodedUser.substring(colon + 1).trim()
-        if (method.isEmpty() || password.isEmpty()) return null
+        if (method !in SUPPORTED_SS_METHODS || password.isEmpty()) return null
+
+        if (method.startsWith("2022-blake3-")) {
+            val parts = password.split(':')
+            if (parts.any { decodeBase64Bytes(it).isEmpty() }) return null
+        }
 
         val name = safeDecode(rawName, plusAsSpace = true).trim().ifEmpty { "[SS] $host:$port" }
 
@@ -473,17 +534,76 @@ object VlessParser {
         return params
     }
 
-    private fun decodeBase64Flexible(input: String): String {
-        if (input.isBlank()) return ""
+    private fun decodeBase64Bytes(input: String): ByteArray {
+        if (input.isBlank()) return ByteArray(0)
         return try {
-            String(Base64.decode(input, Base64.DEFAULT), Charsets.UTF_8)
+            Base64.decode(input, Base64.DEFAULT)
         } catch (_: Exception) {
             try {
-                String(Base64.decode(input, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+                Base64.decode(input, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
             } catch (_: Exception) {
-                ""
+                ByteArray(0)
             }
         }
+    }
+
+    private fun decodeBase64Flexible(input: String): String {
+        val bytes = decodeBase64Bytes(input)
+        return if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
+    }
+
+    /**
+     * Пакетная конфигурация: один процесс Xray проверяет сразу до 20 узлов
+     * через отдельные локальные SOCKS5-порты (basePort..basePort+N-1).
+     */
+    fun buildBatchTestConfig(nodes: List<VlessNode>, basePort: Int): String {
+        val root = JSONObject()
+        root.put("log", JSONObject().apply { put("loglevel", "error") })
+        root.put("dns", JSONObject().apply {
+            put("servers", JSONArray().put("77.88.8.8").put("1.1.1.1"))
+            put("queryStrategy", "UseIPv4")
+        })
+
+        val inbounds = JSONArray()
+        val outbounds = JSONArray()
+        val rules = JSONArray()
+
+        rules.put(JSONObject().apply {
+            put("type", "field")
+            put("ip", JSONArray().put("77.88.8.8/32").put("77.88.8.1/32").put("1.1.1.1/32").put("8.8.8.8/32"))
+            put("outboundTag", "direct")
+        })
+
+        nodes.forEachIndexed { i, node ->
+            val inTag = "in-$i"
+            val outTag = "out-$i"
+            inbounds.put(JSONObject().apply {
+                put("tag", inTag)
+                put("listen", "127.0.0.1")
+                put("port", basePort + i)
+                put("protocol", "socks")
+                put("settings", JSONObject().apply {
+                    put("auth", "noauth")
+                    put("udp", false)
+                    put("ip", "127.0.0.1")
+                })
+            })
+            outbounds.put(buildProxyOutbound(node, outTag))
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("inboundTag", JSONArray().put(inTag))
+                put("outboundTag", outTag)
+            })
+        }
+
+        outbounds.put(buildDirectOutbound())
+        root.put("inbounds", inbounds)
+        root.put("outbounds", outbounds)
+        root.put("routing", JSONObject().apply {
+            put("domainStrategy", "AsIs")
+            put("rules", rules)
+        })
+        return root.toString()
     }
 
     fun buildXrayConfig(
@@ -559,6 +679,18 @@ object VlessParser {
             }
 
             if (smartBypass) {
+                // google.ru всегда через FakeDNS, остальные .ru — через 77.88.8.8
+                dnsServers.put(JSONObject().apply {
+                    put("address", "fakedns")
+                    put("domains", JSONArray().put("domain:google.ru"))
+                })
+                if (splitRu) {
+                    dnsServers.put(JSONObject().apply {
+                        put("address", "77.88.8.8")
+                        put("domains", JSONArray(DIRECT_DOMAINS))
+                        put("skipFallback", true)
+                    })
+                }
                 val fakeTargets = ArrayList<String>()
                 fakeTargets.addAll(AI_AND_SOCIAL_DOMAINS)
                 if (!useLocalDpi) fakeTargets.addAll(YOUTUBE_DOMAINS)
@@ -631,13 +763,7 @@ object VlessParser {
             })
         }
 
-        outbounds.put(JSONObject().apply {
-            put("tag", "direct")
-            put("protocol", "freedom")
-            put("settings", JSONObject().apply {
-                put("domainStrategy", "UseIPv4")
-            })
-        })
+        outbounds.put(buildDirectOutbound())
         outbounds.put(JSONObject().apply {
             put("tag", "dns-out")
             put("protocol", "dns")
@@ -650,6 +776,7 @@ object VlessParser {
 
         val rules = JSONArray()
         if (!isTestMode) {
+            // 1. Внутренний DNS (порт 53)
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -657,12 +784,22 @@ object VlessParser {
                 put("outboundTag", "dns-out")
             })
 
+            // 2. Блокируем Private DNS (DoT, порт 853), чтобы Android/Pixel не обходил VPN-DNS
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("inboundTag", JSONArray().put("socks-in"))
+                put("port", "853")
+                put("outboundTag", "block")
+            })
+
+            // 3. Прямой DNS провайдера/Яндекса
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("77.88.8.8/32").put("77.88.8.1/32"))
                 put("outboundTag", "direct")
             })
 
+            // 4. DoH 1.1.1.1 / 8.8.8.8 через основной прокси
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("1.1.1.1/32").put("8.8.8.8/32"))
@@ -670,6 +807,7 @@ object VlessParser {
                 put("outboundTag", "proxy")
             })
 
+            // 5. Блокируем QUIC только для Google и YouTube
             if (blockQuic) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
@@ -680,6 +818,7 @@ object VlessParser {
                 })
             }
 
+            // 6. Локальные сети напрямую
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().apply {
@@ -691,6 +830,7 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
+            // 7. Канал YouTube
             val ytTag = when {
                 useLocalDpi -> "dpi-out"
                 hasSeparateMedia -> "media-proxy"
@@ -702,6 +842,7 @@ object VlessParser {
                 put("outboundTag", ytTag)
             })
 
+            // 8. Канал Telegram
             val tgTag = when {
                 tgDirect -> "direct"
                 hasSeparateMedia -> "media-proxy"
@@ -718,12 +859,14 @@ object VlessParser {
                 put("outboundTag", tgTag)
             })
 
+            // 9. Канал ИИ + Meta + Discord
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("domain", JSONArray(AI_AND_SOCIAL_DOMAINS))
                 put("outboundTag", "proxy")
             })
 
+            // 10. Остальной FakeDNS-пул (198.18.0.0/15) всегда в proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("198.18.0.0/15"))
@@ -788,6 +931,19 @@ object VlessParser {
         })
 
         return root.toString(2)
+    }
+
+    private fun buildDirectOutbound(): JSONObject {
+        return JSONObject().apply {
+            put("tag", "direct")
+            put("protocol", "freedom")
+            put("settings", JSONObject())
+            put("streamSettings", JSONObject().apply {
+                put("sockopt", JSONObject().apply {
+                    put("domainStrategy", "UseIPv4")
+                })
+            })
+        }
     }
 
     private fun buildProxyOutbound(node: VlessNode, tagName: String): JSONObject {
