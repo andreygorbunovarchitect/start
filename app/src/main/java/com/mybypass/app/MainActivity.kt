@@ -54,11 +54,11 @@ class MainActivity : AppCompatActivity() {
     private var pendingSkipCheck: Boolean = false
 
     private val subPresets = listOf(
-        "ВСЕ (8 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
-        "Только РФ-базы (4)" to VlessParser.ALL_FREE_URLS.take(4).joinToString("\n"),
-        "Igareck РФ" to VlessParser.ALL_FREE_URLS[0],
-        "Reality Белые" to VlessParser.ALL_FREE_URLS[2],
-        "Zieng2 Lite" to VlessParser.ALL_FREE_URLS[4]
+        "ВСЕ (14 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
+        "Зарубежные (6)" to VlessParser.FOREIGN_FREE_URLS.joinToString("\n"),
+        "РФ-совмест. (8)" to VlessParser.RU_COMPATIBLE_URLS.joinToString("\n"),
+        "Reality Белые" to VlessParser.RU_COMPATIBLE_URLS[2],
+        "Zieng2 Lite" to VlessParser.RU_COMPATIBLE_URLS[4]
     )
 
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -163,7 +163,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        root.addView(sectionLabel("Базы бесплатных серверов GitHub (8 баз) или свой ключ"))
+        root.addView(sectionLabel("Базы бесплатных серверов GitHub (14 баз) или свой ключ"))
 
         val subScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -233,7 +233,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(actionRow)
 
         localDpiCheck = CheckBox(this).apply {
-            text = "Канал YouTube: локальный DPI (выкл. = отдельный прокси для видео)"
+            text = "Поток #2 YouTube: локальный DPI (выкл. = отдельный сервер #2)"
             isChecked = ServerScanner.isLocalDpiEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#81D4FA"))
             textSize = 13f
@@ -266,7 +266,7 @@ class MainActivity : AppCompatActivity() {
         ).apply { topMargin = dp(4); bottomMargin = dp(4) })
 
         tgDirectCheck = CheckBox(this).apply {
-            text = "Канал Telegram: напрямую (выкл. = через прокси-канал)"
+            text = "Поток #3 Telegram: напрямую (выкл. = отдельный сервер #3)"
             isChecked = ServerScanner.isTgDirectEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#CE93D8"))
             textSize = 13f
@@ -275,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(tgDirectCheck)
 
         smartBypassCheck = CheckBox(this).apply {
-            text = "Разделение каналов + FakeDNS (ИИ/Meta -> #1, YT/TG -> #2)"
+            text = "Разделение на 3 потока + FakeDNS (ИИ #1, YT #2, TG #3)"
             isChecked = ServerScanner.isSmartBypassEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#A5D6A7"))
             textSize = 13f
@@ -284,7 +284,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(smartBypassCheck)
 
         aiCountryCheck = CheckBox(this).apply {
-            text = "Фильтр под ИИ: исключить РФ, РБ, Китай и Гонконг"
+            text = "Фильтр под ИИ: исключить РФ, РБ, Китай, Иран и РФ-хостеров"
             isChecked = ServerScanner.isAiFilterEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
@@ -293,7 +293,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(aiCountryCheck)
 
         splitRuCheck = CheckBox(this).apply {
-            text = "Split Routing: РФ (.ru), банки и Госуслуги напрямую"
+            text = "Поток #4 Direct: РФ (.ru), банки и Госуслуги напрямую"
             isChecked = ServerScanner.isSplitRuEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
@@ -394,7 +394,7 @@ class MainActivity : AppCompatActivity() {
         selectedTested = chosen
         ServerScanner.saveSelectedNode(this, chosen)
         refreshSelectedLabel()
-        BypassVpnService.log("Переключение канала ИИ на #${nextIdx + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+        BypassVpnService.log("Переключение потока #1 на #${nextIdx + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
         requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
     }
 
@@ -409,13 +409,13 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Серверы (${workingNodes.size}) — #1 для ИИ, #2 для YouTube/TG")
+            .setTitle("Серверы (${workingNodes.size}) — #1 ИИ, #2 YT, #3 TG")
             .setItems(items) { _, which ->
                 val chosen = workingNodes[which]
                 selectedTested = chosen
                 ServerScanner.saveSelectedNode(this, chosen)
                 refreshSelectedLabel()
-                BypassVpnService.log("Выбран канал ИИ #${which + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+                BypassVpnService.log("Выбран поток #1 (${which + 1}): ${chosen.shortTitle()} (${chosen.pingMs} мс)")
                 requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
             }
             .setNegativeButton("Закрыть", null)
@@ -431,8 +431,8 @@ class MainActivity : AppCompatActivity() {
             val poolStr = if (idx >= 0 && workingNodes.isNotEmpty()) " [${idx + 1}/${workingNodes.size}]" else ""
             val pingStr = if (current.pingMs >= 0) " • ${current.pingMs} мс" else ""
             val cc = if (current.countryCode.isNotBlank()) "[${current.countryCode}] " else ""
-            "Канал ИИ$poolStr: $cc${current.node.name}\n" +
-                "${current.capabilitiesTag()} • ${current.node.protocol}/${current.node.security}/${current.node.network}$pingStr"
+            "Поток #1 (ИИ)$poolStr: $cc${current.node.name}\n" +
+                "${current.capabilitiesTag()}${current.speedLabel()} • ${current.node.protocol}/${current.node.security}/${current.node.network}$pingStr"
         }
         val gemCount = workingNodes.count { it.hasGeminiAccess }
         listBtn.text = if (workingNodes.isNotEmpty()) {
