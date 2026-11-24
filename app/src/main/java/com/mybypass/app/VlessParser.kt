@@ -187,7 +187,8 @@ object VlessParser {
         "domain:discord.media",
         "domain:discordcdn.com",
         "domain:hcaptcha.com",
-        "domain:challenges.cloudflare.com",
+        "domain:cloudflare.com",
+        "domain:cloudflareclient.com",
         "domain:instagram.com",
         "domain:cdninstagram.com",
         "domain:igcdn.com",
@@ -1020,6 +1021,7 @@ object VlessParser {
                 }))
                 put("mtu", 1280)
                 put("reserved", reservedArr)
+                put("domainStrategy", "ForceIPv4")
             })
             put("streamSettings", JSONObject().apply {
                 put("sockopt", JSONObject().apply {
