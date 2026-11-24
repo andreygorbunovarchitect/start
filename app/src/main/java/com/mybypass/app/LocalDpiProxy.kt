@@ -12,9 +12,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 object LocalDpiProxy {
 
     val PROFILE_NAMES = listOf(
-        "DPI 1: Split + Disorder (рекомендуется)",
-        "DPI 2: Фрагментация по 2 байта",
-        "DPI 3: Мягкий Split (граница SNI)"
+        "DPI 1: Split на границе SNI (рекомендуется)",
+        "DPI 2: Split + Disorder (обратный порядок)",
+        "DPI 3: Фрагментация по 2 байта",
+        "DPI 4: Выключен (пустить YT/Discord через VLESS)"
     )
 
     private val running = AtomicBoolean(false)
@@ -29,6 +30,8 @@ object LocalDpiProxy {
     fun start(port: Int = 1081, profileIndex: Int = 0): Boolean {
         stop()
         currentProfile = profileIndex.coerceIn(0, PROFILE_NAMES.lastIndex)
+        if (currentProfile == 3) return false
+
         return try {
             val ss = ServerSocket()
             ss.reuseAddress = true
@@ -67,7 +70,7 @@ object LocalDpiProxy {
     private fun handleClient(client: Socket) {
         var remote: Socket? = null
         try {
-            client.soTimeout = 15000
+            client.soTimeout = 20000
             val input = client.getInputStream()
             val output = client.getOutputStream()
 
@@ -191,11 +194,13 @@ object LocalDpiProxy {
     }
 
     private fun connectDirect(host: String, port: Int): Socket? {
+        // Защита от случайного попадания FakeDNS-диапазона 198.18.0.0/15
+        if (host.startsWith("198.18.") || host.startsWith("198.19.")) return null
         return try {
             val addr = InetAddress.getByName(host)
             val sock = Socket()
             sock.tcpNoDelay = true
-            sock.soTimeout = 20000
+            sock.soTimeout = 25000
             sock.connect(InetSocketAddress(addr, port), 6000)
             sock
         } catch (_: Exception) {
@@ -220,7 +225,7 @@ object LocalDpiProxy {
                     writeDesyncedChunk(rOut, firstBuf, firstRead, profile)
                 }
 
-                val buf = ByteArray(8192)
+                val buf = ByteArray(16384)
                 while (true) {
                     val n = cIn.read(buf)
                     if (n <= 0) break
@@ -235,7 +240,7 @@ object LocalDpiProxy {
 
         val downThread = Thread {
             try {
-                val buf = ByteArray(8192)
+                val buf = ByteArray(16384)
                 while (true) {
                     val n = rIn.read(buf)
                     if (n <= 0) break
@@ -250,8 +255,8 @@ object LocalDpiProxy {
 
         upThread.start()
         downThread.start()
-        upThread.join(30000)
-        downThread.join(30000)
+        upThread.join(60000)
+        downThread.join(60000)
     }
 
     private fun writeDesyncedChunk(out: OutputStream, data: ByteArray, len: Int, profile: Int) {
@@ -262,33 +267,66 @@ object LocalDpiProxy {
         }
 
         when (profile) {
+            // Профиль 1: Разбиение TLS-записи + разрыв посередине SNI-домена
             0 -> {
+                val sniPos = findSniOffset(data, len)
+                if (sniPos > 5 && sniPos + 3 < len) {
+                    // Разрываем TLS Record Header (первые 2 байта отдельно) и затем рвём имя хоста SNI
+                    out.write(data, 0, 2)
+                    out.flush()
+                    Thread.sleep(3)
+                    out.write(data, 2, sniPos - 2)
+                    out.flush()
+                    Thread.sleep(3)
+                    out.write(data, sniPos, len - sniPos)
+                    out.flush()
+                } else {
+                    val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
+                    out.write(data, 0, splitAt)
+                    out.flush()
+                    Thread.sleep(4)
+                    out.write(data, splitAt, len - splitAt)
+                    out.flush()
+                }
+            }
+            // Профиль 2: Split + Disorder
+            1 -> {
                 val splitAt = minOf(5, len / 2)
                 out.write(data, splitAt, len - splitAt)
                 out.flush()
-                Thread.sleep(5)
+                Thread.sleep(4)
                 out.write(data, 0, splitAt)
                 out.flush()
             }
-            1 -> {
+            // Профиль 3: Фрагментация по 2 байта
+            else -> {
                 var offset = 0
                 while (offset < len) {
                     val step = minOf(2, len - offset)
                     out.write(data, offset, step)
                     out.flush()
                     offset += step
-                    if (offset < len && offset < 64) Thread.sleep(2)
+                    if (offset < len && offset < 80) Thread.sleep(2)
                 }
             }
-            else -> {
-                val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
-                out.write(data, 0, splitAt)
-                out.flush()
-                Thread.sleep(6)
-                out.write(data, splitAt, len - splitAt)
-                out.flush()
+        }
+    }
+
+    private fun findSniOffset(data: ByteArray, len: Int): Int {
+        // Ищем TLS ClientHello (0x16 0x03) и расширение SNI (0x00 0x00)
+        if (len < 45 || (data[0].toInt() and 0xFF) != 0x16 || (data[1].toInt() and 0xFF) != 0x03) {
+            return -1
+        }
+        for (i in 40 until len - 9) {
+            if (data[i] == 0x00.toByte() && data[i + 1] == 0x00.toByte()) {
+                val nameType = data[i + 6].toInt() and 0xFF
+                val nameLen = ((data[i + 7].toInt() and 0xFF) shl 8) or (data[i + 8].toInt() and 0xFF)
+                if (nameType == 0x00 && nameLen in 4..253 && i + 9 + nameLen <= len) {
+                    return i + 9 + (nameLen / 2)
+                }
             }
         }
+        return -1
     }
 
     private fun readFully(input: InputStream, buf: ByteArray, length: Int): Boolean {
