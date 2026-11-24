@@ -97,7 +97,7 @@ object WarpManager {
             host = "api.cloudflareclient.com",
             path = "/v0a2158/reg",
             jsonBody = payload,
-            timeoutMs = 5000
+            timeoutMs = 6000
         ) ?: return null
 
         return try {
@@ -403,7 +403,15 @@ object WarpManager {
 
             val full = ssl.getInputStream().readBytes().toString(Charsets.UTF_8)
             val splitIdx = full.indexOf("\r\n\r\n")
-            if (splitIdx < 0) null else full.substring(splitIdx + 4)
+            if (splitIdx < 0) return null
+            val rawBody = full.substring(splitIdx + 4)
+            val jsonStart = rawBody.indexOf('{')
+            val jsonEnd = rawBody.lastIndexOf('}')
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                rawBody.substring(jsonStart, jsonEnd + 1)
+            } else {
+                null
+            }
         } catch (_: Exception) {
             null
         } finally {
