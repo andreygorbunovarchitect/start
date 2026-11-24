@@ -33,7 +33,9 @@ class BypassVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
     private var tproxyStarted = false
+    @Volatile
     private var currentActiveNode: TestedNode? = null
+    private var consecutiveWatchdogFails = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -94,6 +96,7 @@ class BypassVpnService : VpnService() {
 
     private fun startWatchdog(blockIpv6: Boolean) {
         stopWatchdog()
+        consecutiveWatchdogFails = 0
         val sched = Executors.newSingleThreadScheduledExecutor()
         watchdog = sched
         sched.scheduleWithFixedDelay({
@@ -101,26 +104,44 @@ class BypassVpnService : VpnService() {
                 if (!isRunning || isAutoSearching) return@scheduleWithFixedDelay
                 val active = currentActiveNode ?: return@scheduleWithFixedDelay
                 val ping = ServerScanner.quickLiveCheckNode(applicationContext, active.node, 10828)
-                if (ping < 0 && isRunning) {
-                    log("Сторож: текущий узел просел/упал -> ищу живую замену...")
-                    val list = ServerScanner.loadWorkingList(applicationContext)
-                    val next = list.firstOrNull { it.node.rawUri != active.node.rawUri }
-                    if (next != null) {
-                        val np = ServerScanner.quickLiveCheckNode(applicationContext, next.node, 10828)
-                        if (np > 0) {
-                            val updated = next.copy(pingMs = np)
-                            ServerScanner.saveSelectedNode(applicationContext, updated)
-                            executor.execute {
-                                if (isRunning) {
-                                    applyNodeConfig(updated, blockIpv6)
-                                }
-                            }
+                if (ping > 0) {
+                    consecutiveWatchdogFails = 0
+                    return@scheduleWithFixedDelay
+                }
+
+                consecutiveWatchdogFails++
+                if (consecutiveWatchdogFails < 2) return@scheduleWithFixedDelay
+
+                consecutiveWatchdogFails = 0
+                log("Сторож: текущий узел перестал отвечать -> ищу замену...")
+                val list = ServerScanner.loadWorkingList(applicationContext)
+                var replacement: TestedNode? = null
+                var checked = 0
+                for (cand in list) {
+                    if (cand.node.rawUri == active.node.rawUri) continue
+                    if (checked >= 5) break
+                    checked++
+                    val np = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10828)
+                    if (np > 0) {
+                        replacement = cand.copy(pingMs = np)
+                        break
+                    }
+                }
+
+                if (replacement != null && isRunning) {
+                    val chosen = replacement
+                    ServerScanner.saveSelectedNode(applicationContext, chosen)
+                    executor.execute {
+                        if (isRunning) {
+                            log("Сторож: переключаю на ${chosen.shortTitle()} (${chosen.pingMs}мс)")
+                            stopTunnelInternal(stopService = false)
+                            applyNodeConfig(chosen, blockIpv6)
                         }
                     }
                 }
             } catch (_: Exception) {
             }
-        }, 25L, 25L, TimeUnit.SECONDS)
+        }, 30L, 30L, TimeUnit.SECONDS)
     }
 
     private fun stopWatchdog() {
@@ -145,16 +166,12 @@ class BypassVpnService : VpnService() {
         return null
     }
 
-    private fun isTgDirectEnabled(): Boolean =
-        applicationContext.getSharedPreferences(ServerScanner.PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean("tg_direct", false)
-
     private fun applyNodeConfig(target: TestedNode, blockIpv6: Boolean) {
         currentActiveNode = target
         val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
         val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
         val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(target.node) else null
-        val tgDirect = isTgDirectEnabled()
+        val tgDirect = ServerScanner.isTgDirectEnabled(applicationContext)
 
         val configJson = VlessParser.buildXrayConfig(
             node = target.node,
@@ -232,7 +249,7 @@ class BypassVpnService : VpnService() {
             isAutoSearching = false
             searchStatusText = ""
             applyNodeConfig(target, blockIpv6)
-            startWatchdog(blockIpv6)
+            if (isRunning) startWatchdog(blockIpv6)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -289,14 +306,14 @@ class BypassVpnService : VpnService() {
             searchStatusText = ""
 
             if (chosen == null) {
-                log("Автопоиск не нашёл рабочих серверов в текущих базах. Попробуйте нажать «Автопоиск» ещё раз или сменить сеть (Wi-Fi / мобильный интернет).")
+                log("Автопоиск не нашёл рабочих серверов. Убедитесь, что другой VPN выключен, и нажмите «Автопоиск» ещё раз.")
                 stopTunnelInternal(stopService = true)
                 return
             }
 
             val blockIpv6 = ServerScanner.isBlockIpv6Enabled(applicationContext)
             applyNodeConfig(chosen, blockIpv6)
-            startWatchdog(blockIpv6)
+            if (isRunning) startWatchdog(blockIpv6)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -361,9 +378,17 @@ class BypassVpnService : VpnService() {
                 }
             }.apply { isDaemon = true }.start()
 
-            Thread.sleep(350)
-            if (!proc.isAlive) {
-                log("ОШИБКА: Xray не запустился (код ${proc.exitValue()}).")
+            var portReady = false
+            for (i in 0 until 12) {
+                if (!proc.isAlive) break
+                if (ServerScanner.tcpPing("127.0.0.1", 1080, 100) >= 0) {
+                    portReady = true
+                    break
+                }
+                Thread.sleep(100)
+            }
+            if (!proc.isAlive || !portReady) {
+                log("ОШИБКА: Xray не смог открыть порт 1080.")
                 stopTunnelInternal(stopService = true)
                 return
             }
@@ -463,11 +488,19 @@ class BypassVpnService : VpnService() {
             tproxyStarted = false
         }
 
-        try {
-            xrayProcess?.destroy()
-        } catch (_: Exception) {
-        }
+        val oldProc = xrayProcess
         xrayProcess = null
+        if (oldProc != null) {
+            try { oldProc.destroy() } catch (_: Exception) {}
+            try {
+                if (!oldProc.waitFor(200, TimeUnit.MILLISECONDS)) {
+                    oldProc.destroyForcibly()
+                    oldProc.waitFor(200, TimeUnit.MILLISECONDS)
+                }
+            } catch (_: Exception) {
+                try { oldProc.destroyForcibly() } catch (_: Exception) {}
+            }
+        }
 
         try {
             tunInterface?.close()
@@ -657,7 +690,7 @@ class BypassVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
             }
-            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать серверы из баз GitHub." }
+            return sb.toString().trim().ifEmpty { "Отключите другие VPN и нажмите «Автопоиск»." }
         }
 
         @Synchronized
