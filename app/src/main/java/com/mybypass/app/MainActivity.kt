@@ -134,7 +134,12 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     savePrefs()
                     val input = subInput.text.toString().trim()
-                    if (input.startsWith("vless://", ignoreCase = true) && !input.contains('\n')) {
+                    val isSingleKey = !input.contains('\n') && (
+                        input.startsWith("vless://", true) ||
+                            input.startsWith("trojan://", true) ||
+                            input.startsWith("ss://", true)
+                        )
+                    if (isSingleKey) {
                         val parsed = VlessParser.parseVlessUri(input, isCuratedSource = true)
                         if (parsed != null) {
                             val manual = TestedNode(node = parsed, pingMs = -1L)
@@ -143,7 +148,7 @@ class MainActivity : AppCompatActivity() {
                             refreshSelectedLabel()
                             requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = true)
                         } else {
-                            Toast.makeText(this@MainActivity, "Неверный формат ссылки vless://", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "Неверный формат ключа", Toast.LENGTH_SHORT).show()
                         }
                     } else if (selectedTested != null) {
                         requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
@@ -158,7 +163,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        root.addView(sectionLabel("Базы бесплатных серверов GitHub (8 баз) или свой ключ vless://"))
+        root.addView(sectionLabel("Базы бесплатных серверов GitHub (8 баз) или свой ключ"))
 
         val subScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -173,7 +178,7 @@ class MainActivity : AppCompatActivity() {
 
         subInput = EditText(this).apply {
             setText(ServerScanner.getSavedSubText(this@MainActivity))
-            hint = "Одна или несколько ссылок https://... или vless://..."
+            hint = "Ссылки https://... или vless:// / trojan:// / ss://"
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
             typeface = Typeface.MONOSPACE
@@ -228,7 +233,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(actionRow)
 
         localDpiCheck = CheckBox(this).apply {
-            text = "Канал YouTube: локальный DPI (выкл. = отдельный VLESS для видео)"
+            text = "Канал YouTube: локальный DPI (выкл. = отдельный прокси для видео)"
             isChecked = ServerScanner.isLocalDpiEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#81D4FA"))
             textSize = 13f
@@ -261,8 +266,8 @@ class MainActivity : AppCompatActivity() {
         ).apply { topMargin = dp(4); bottomMargin = dp(4) })
 
         tgDirectCheck = CheckBox(this).apply {
-            text = "Канал Telegram: напрямую (быстрые чаты без нагрузки на VLESS)"
-            isChecked = getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).getBoolean("tg_direct", true)
+            text = "Канал Telegram: напрямую (выкл. = через прокси-канал)"
+            isChecked = ServerScanner.isTgDirectEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#CE93D8"))
             textSize = 13f
             setOnCheckedChangeListener { _, _ -> savePrefs() }
@@ -270,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(tgDirectCheck)
 
         smartBypassCheck = CheckBox(this).apply {
-            text = "Разделение каналов + FakeDNS (ИИ/Meta -> VLESS #1, YT -> канал #2)"
+            text = "Разделение каналов + FakeDNS (ИИ/Meta -> #1, YT/TG -> #2)"
             isChecked = ServerScanner.isSmartBypassEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#A5D6A7"))
             textSize = 13f
@@ -404,7 +409,7 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Серверы (${workingNodes.size}) — #1 для ИИ, #2 для YouTube")
+            .setTitle("Серверы (${workingNodes.size}) — #1 для ИИ, #2 для YouTube/TG")
             .setItems(items) { _, which ->
                 val chosen = workingNodes[which]
                 selectedTested = chosen
@@ -427,9 +432,9 @@ class MainActivity : AppCompatActivity() {
             val pingStr = if (current.pingMs >= 0) " • ${current.pingMs} мс" else ""
             val cc = if (current.countryCode.isNotBlank()) "[${current.countryCode}] " else ""
             "Канал ИИ$poolStr: $cc${current.node.name}\n" +
-                "${current.capabilitiesTag()} • ${current.node.security}/${current.node.network}$pingStr"
+                "${current.capabilitiesTag()} • ${current.node.protocol}/${current.node.security}/${current.node.network}$pingStr"
         }
-        val gemCount = workingNodes.count { it.geminiOk }
+        val gemCount = workingNodes.count { it.hasGeminiAccess }
         listBtn.text = if (workingNodes.isNotEmpty()) {
             "Список (${workingNodes.size} | Gem:$gemCount)"
         } else {
