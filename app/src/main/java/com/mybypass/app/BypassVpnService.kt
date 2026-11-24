@@ -147,17 +147,21 @@ class BypassVpnService : VpnService() {
             isAutoSearching = false
             searchStatusText = ""
 
+            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext)
+            val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
             val configJson = VlessParser.buildXrayConfig(
                 node = target.node,
                 socksPort = 1080,
                 smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
                 splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
                 blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
+                useLocalDpi = useLocalDpi,
+                dpiPort = 1081,
                 isTestMode = false
             )
             val label = target.shortTitle()
             updateNotification(label)
-            startTunnel(configJson, label, blockIpv6)
+            startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -219,17 +223,21 @@ class BypassVpnService : VpnService() {
                 return
             }
 
+            val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext)
+            val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
             val configJson = VlessParser.buildXrayConfig(
                 node = chosen.node,
                 socksPort = 1080,
                 smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
                 splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
                 blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
+                useLocalDpi = useLocalDpi,
+                dpiPort = 1081,
                 isTestMode = false
             )
             val label = chosen.shortTitle()
             updateNotification(label)
-            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext))
+            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext), useLocalDpi, dpiProfile)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -238,11 +246,24 @@ class BypassVpnService : VpnService() {
         }
     }
 
-    private fun startTunnel(configJson: String, serverName: String, blockIpv6: Boolean) {
+    private fun startTunnel(
+        configJson: String,
+        serverName: String,
+        blockIpv6: Boolean,
+        useLocalDpi: Boolean,
+        dpiProfile: Int
+    ) {
         if (configJson.isBlank()) {
             log("ОШИБКА: пустая конфигурация Xray.")
             stopTunnelInternal(stopService = true)
             return
+        }
+
+        if (useLocalDpi) {
+            val dpiOk = LocalDpiProxy.start(port = 1081, profileIndex = dpiProfile)
+            if (dpiOk) {
+                log("Локальный DPI-обход активен (${LocalDpiProxy.PROFILE_NAMES[LocalDpiProxy.currentProfile]})")
+            }
         }
 
         val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
@@ -294,7 +315,6 @@ class BypassVpnService : VpnService() {
             return
         }
 
-        // MTU 1400 предотвращает фрагментацию пакетов внутри VLESS и ускоряет YouTube/звонки
         val builder = Builder()
             .setSession("MyBypassXray")
             .setMtu(1400)
@@ -368,6 +388,8 @@ class BypassVpnService : VpnService() {
     }
 
     private fun stopTunnelInternal(stopService: Boolean) {
+        LocalDpiProxy.stop()
+
         if (tproxyStarted) {
             try {
                 TProxyService.TProxyStopService()
@@ -475,7 +497,7 @@ class BypassVpnService : VpnService() {
     override fun onDestroy() {
         ServerScanner.cancelScan()
         executor.execute {
-            if (isRunning || tunInterface != null || xrayProcess != null) {
+            if (isRunning || tunInterface != null || xrayProcess != null || LocalDpiProxy.isRunning()) {
                 stopTunnelInternal(stopService = false)
             }
         }
