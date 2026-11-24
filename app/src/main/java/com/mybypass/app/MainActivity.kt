@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var subInput: EditText
     private lateinit var localDpiCheck: CheckBox
     private lateinit var dpiProfileSpinner: Spinner
+    private lateinit var tgDirectCheck: CheckBox
     private lateinit var smartBypassCheck: CheckBox
     private lateinit var aiCountryCheck: CheckBox
     private lateinit var splitRuCheck: CheckBox
@@ -227,7 +228,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(actionRow)
 
         localDpiCheck = CheckBox(this).apply {
-            text = "Локальный DPI-обход (фрагментация для YT и Discord)"
+            text = "Канал YouTube: локальный DPI (выкл. = отдельный VLESS для видео)"
             isChecked = ServerScanner.isLocalDpiEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#81D4FA"))
             textSize = 13f
@@ -259,8 +260,17 @@ class MainActivity : AppCompatActivity() {
             dp(42)
         ).apply { topMargin = dp(4); bottomMargin = dp(4) })
 
+        tgDirectCheck = CheckBox(this).apply {
+            text = "Канал Telegram: напрямую (быстрые чаты без нагрузки на VLESS)"
+            isChecked = getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).getBoolean("tg_direct", true)
+            setTextColor(Color.parseColor("#CE93D8"))
+            textSize = 13f
+            setOnCheckedChangeListener { _, _ -> savePrefs() }
+        }
+        root.addView(tgDirectCheck)
+
         smartBypassCheck = CheckBox(this).apply {
-            text = "Умный обход + FakeDNS (ИИ, Meta, TG через VPN; сеть напрямую)"
+            text = "Разделение каналов + FakeDNS (ИИ/Meta -> VLESS #1, YT -> канал #2)"
             isChecked = ServerScanner.isSmartBypassEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#A5D6A7"))
             textSize = 13f
@@ -287,7 +297,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(splitRuCheck)
 
         blockQuicCheck = CheckBox(this).apply {
-            text = "Блокировать QUIC — стабильные Google и YouTube"
+            text = "Блокировать QUIC для Google и YouTube (стабильный TCP)"
             isChecked = ServerScanner.isBlockQuicEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
@@ -379,7 +389,7 @@ class MainActivity : AppCompatActivity() {
         selectedTested = chosen
         ServerScanner.saveSelectedNode(this, chosen)
         refreshSelectedLabel()
-        BypassVpnService.log("Переключение на сервер #${nextIdx + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+        BypassVpnService.log("Переключение канала ИИ на #${nextIdx + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
         requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
     }
 
@@ -394,13 +404,13 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("Серверы (${workingNodes.size}) — сначала с Gemini")
+            .setTitle("Серверы (${workingNodes.size}) — #1 для ИИ, #2 для YouTube")
             .setItems(items) { _, which ->
                 val chosen = workingNodes[which]
                 selectedTested = chosen
                 ServerScanner.saveSelectedNode(this, chosen)
                 refreshSelectedLabel()
-                BypassVpnService.log("Выбран сервер #${which + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
+                BypassVpnService.log("Выбран канал ИИ #${which + 1}: ${chosen.shortTitle()} (${chosen.pingMs} мс)")
                 requestVpnAndRun(BypassVpnService.ACTION_START, skipCheck = false)
             }
             .setNegativeButton("Закрыть", null)
@@ -416,7 +426,7 @@ class MainActivity : AppCompatActivity() {
             val poolStr = if (idx >= 0 && workingNodes.isNotEmpty()) " [${idx + 1}/${workingNodes.size}]" else ""
             val pingStr = if (current.pingMs >= 0) " • ${current.pingMs} мс" else ""
             val cc = if (current.countryCode.isNotBlank()) "[${current.countryCode}] " else ""
-            "Сервер$poolStr: $cc${current.node.name}\n" +
+            "Канал ИИ$poolStr: $cc${current.node.name}\n" +
                 "${current.capabilitiesTag()} • ${current.node.security}/${current.node.network}$pingStr"
         }
         val gemCount = workingNodes.count { it.geminiOk }
@@ -433,6 +443,7 @@ class MainActivity : AppCompatActivity() {
             .putString("sub_url", subInput.text.toString().trim())
             .putBoolean("local_dpi", localDpiCheck.isChecked)
             .putInt("dpi_profile", dpiProfileSpinner.selectedItemPosition.coerceAtLeast(0))
+            .putBoolean("tg_direct", tgDirectCheck.isChecked)
             .putBoolean("smart_bypass", smartBypassCheck.isChecked)
             .putBoolean("ai_country_filter", aiCountryCheck.isChecked)
             .putBoolean("split_ru", splitRuCheck.isChecked)
@@ -577,6 +588,7 @@ class MainActivity : AppCompatActivity() {
         val editable = !running && !searching
         localDpiCheck.isEnabled = editable
         dpiProfileSpinner.isEnabled = editable
+        tgDirectCheck.isEnabled = editable
         smartBypassCheck.isEnabled = editable
         splitRuCheck.isEnabled = editable
         blockQuicCheck.isEnabled = editable
