@@ -64,12 +64,24 @@ object VlessParser {
         "domain:googlevideo.com",
         "domain:ytimg.com",
         "domain:youtube-nocookie.com",
+        "domain:yt.be",
         "domain:discord.com",
         "domain:discord.gg",
         "domain:discordapp.com",
         "domain:discordapp.net",
         "domain:discord.media",
         "domain:discordcdn.com"
+    )
+
+    // Блокируем QUIC только для Google и YouTube (Meta и мессенджеры не блокируем)
+    val QUIC_BLOCK_DOMAINS = listOf(
+        "domain:google.com",
+        "domain:google.ru",
+        "domain:googleapis.com",
+        "domain:gstatic.com",
+        "domain:youtube.com",
+        "domain:googlevideo.com",
+        "domain:ytimg.com"
     )
 
     val DIRECT_DOMAINS = listOf(
@@ -407,10 +419,25 @@ object VlessParser {
                 })
             }
 
+            // ВАЖНО: для DPI_DOMAINS (YouTube/Discord) используем прямой резолв 77.88.8.8, а НЕ FakeDNS,
+            // чтобы LocalDpiProxy получал реальный IPv4-адрес, а не виртуальный 198.18.x.x!
+            if (useLocalDpi) {
+                dnsServers.put(JSONObject().apply {
+                    put("address", "77.88.8.8")
+                    put("domains", JSONArray(DPI_DOMAINS))
+                    put("skipFallback", true)
+                })
+            }
+
             if (smartBypass) {
+                val fakeTargets = if (useLocalDpi) {
+                    PROXY_DOMAINS.filterNot { it in DPI_DOMAINS }
+                } else {
+                    PROXY_DOMAINS
+                }
                 dnsServers.put(JSONObject().apply {
                     put("address", "fakedns")
-                    put("domains", JSONArray(PROXY_DOMAINS))
+                    put("domains", JSONArray(fakeTargets))
                 })
                 dnsServers.put("77.88.8.8")
             } else {
@@ -512,7 +539,7 @@ object VlessParser {
                     put("type", "field")
                     put("inboundTag", JSONArray().put("socks-in"))
                     put("protocol", JSONArray().put("quic"))
-                    if (smartBypass) put("domain", JSONArray(PROXY_DOMAINS))
+                    put("domain", JSONArray(QUIC_BLOCK_DOMAINS))
                     put("outboundTag", "block")
                 })
             }
@@ -534,10 +561,11 @@ object VlessParser {
                 put("outboundTag", "proxy")
             })
 
-            // Локальный DPI-обход для YouTube и Discord на 100% скорости (не грузит бесплатный VLESS)
+            // Локальный DPI-обход для YouTube и Discord (TCP 80/443 идёт через dpi-out, голосовые UDP — через proxy)
             if (useLocalDpi) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
+                    put("network", "tcp")
                     put("domain", JSONArray(DPI_DOMAINS))
                     put("outboundTag", "dpi-out")
                 })
