@@ -54,7 +54,7 @@ object VlessParser {
         "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran|aeza|vdsina|firstbyte|timeweb|selectel|reg\\.ru)([^a-z]|$)"
     )
 
-    // 8 баз с обходом ТСПУ РФ + 6 зарубежных баз с чистыми европейскими и американскими IP для Google AI
+    // Базы, адаптированные под обход ТСПУ в РФ (высокая проходимость)
     val RU_COMPATIBLE_URLS = listOf(
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
@@ -66,10 +66,10 @@ object VlessParser {
         "https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt"
     )
 
+    // Отобранные зарубежные списки без многотысячного мусора
     val FOREIGN_FREE_URLS = listOf(
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
         "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/mix",
-        "https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/vless",
         "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
         "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/vless.txt",
         "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/trojan.txt"
@@ -609,13 +609,6 @@ object VlessParser {
         return root.toString()
     }
 
-    /**
-     * Многопоточная конфигурация Xray:
-     * Поток 1 (proxy): ИИ (Gemini/ChatGPT/Claude), Meta, Discord, западные сайты
-     * Поток 2 (media-proxy или dpi-out): YouTube (видео 1080p/4K не грузит канал ИИ)
-     * Поток 3 (tg-proxy или direct): Telegram (отдельный поток для мессенджера)
-     * Поток 4 (direct): РФ (.ru/.рф), банки, Госуслуги, Яндекс, VK
-     */
     fun buildXrayConfig(
         node: VlessNode,
         mediaNode: VlessNode? = null,
@@ -838,7 +831,6 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
-            // Поток 2: YouTube -> Локальный DPI или выделенный media-proxy
             val ytTag = when {
                 useLocalDpi -> "dpi-out"
                 hasSeparateMedia -> "media-proxy"
@@ -850,7 +842,6 @@ object VlessParser {
                 put("outboundTag", ytTag)
             })
 
-            // Поток 3: Telegram -> Direct или выделенный tg-proxy / media-proxy
             val tgTag = when {
                 tgDirect -> "direct"
                 hasSeparateTg -> "tg-proxy"
@@ -868,7 +859,6 @@ object VlessParser {
                 put("outboundTag", tgTag)
             })
 
-            // Поток 1: ИИ (Gemini/ChatGPT/Claude), Meta, Discord -> основной proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("domain", JSONArray(AI_AND_SOCIAL_DOMAINS))
@@ -955,7 +945,6 @@ object VlessParser {
     }
 
     private fun buildProxyOutbound(node: VlessNode, tagName: String, enableMux: Boolean): JSONObject {
-        // Mux ускоряет параллельные запросы браузера и Gemini (не включается для xtls-rprx-vision, grpc и xhttp)
         val canMux = enableMux &&
             node.flow.isBlank() &&
             node.network in setOf("tcp", "ws", "httpupgrade")
