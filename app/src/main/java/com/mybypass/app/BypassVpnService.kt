@@ -72,7 +72,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_RESCAN_AND_CONNECT -> {
-                if (!ensureForeground("Поиск серверов на GitHub...")) return START_NOT_STICKY
+                if (!ensureForeground("Поиск быстрых серверов...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Загрузка баз..."
                 notifyState(applicationContext)
@@ -141,7 +141,7 @@ class BypassVpnService : VpnService() {
                 }
             } catch (_: Exception) {
             }
-        }, 30L, 30L, TimeUnit.SECONDS)
+        }, 35L, 35L, TimeUnit.SECONDS)
     }
 
     private fun stopWatchdog() {
@@ -156,8 +156,8 @@ class BypassVpnService : VpnService() {
         val list = ServerScanner.loadWorkingList(applicationContext)
         val candidates = list
             .filter { it.node.rawUri != primary.rawUri }
-            .sortedByDescending { it.ytOk }
-            .take(4)
+            .sortedWith(compareByDescending<TestedNode> { it.ytOk }.thenByDescending { it.speedKbps })
+            .take(3)
 
         for (cand in candidates) {
             val p = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10826)
@@ -215,7 +215,7 @@ class BypassVpnService : VpnService() {
 
                 val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824)
                 if (livePing < 0) {
-                    log("Узел не прошёл реальный трафик-тест. Ищу живой в списке...")
+                    log("Узел не отвечает. Ищу живой в списке...")
                     val savedList = ServerScanner.loadWorkingList(applicationContext)
                     var replacement: TestedNode? = null
                     var checked = 0
@@ -446,12 +446,12 @@ class BypassVpnService : VpnService() {
               address: 127.0.0.1
               udp: 'udp'
             misc:
-              task-stack-size: 131072
-              udp-copy-buffer-nums: 20
+              task-stack-size: 262144
+              udp-copy-buffer-nums: 64
               connect-timeout: 10000
               tcp-read-write-timeout: 300000
               udp-read-write-timeout: 120000
-              log-level: warn
+              log-level: error
             """.trimIndent()
         )
 
@@ -465,11 +465,15 @@ class BypassVpnService : VpnService() {
 
             val ytChannel = when {
                 useLocalDpi -> "Локальный DPI"
-                mediaNode != null -> mediaNode.name.take(16)
+                mediaNode != null -> "Канал #2 (${mediaNode.name.take(14)})"
                 else -> "Основной прокси"
             }
-            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через прокси"
-            log("Каналы разделены: ИИ/Meta -> $serverName | YouTube -> $ytChannel | Telegram -> $tgChannel")
+            val tgChannel = when {
+                tgDirect -> "Напрямую (Direct)"
+                mediaNode != null -> "Канал #2"
+                else -> "Основной прокси"
+            }
+            log("Каналы активны: ИИ/Meta -> $serverName | YouTube -> $ytChannel | Telegram -> $tgChannel")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
             stopTunnelInternal(stopService = true)
@@ -635,6 +639,8 @@ class BypassVpnService : VpnService() {
         private var appFilesDir: File? = null
         private val crashHandlerInstalled = AtomicBoolean(false)
         private val logLines = ArrayDeque<String>()
+        @Volatile
+        private var lastUiLogTime = 0L
 
         var onStateListener: ((Boolean) -> Unit)? = null
         var onLogListener: ((String) -> Unit)? = null
@@ -704,14 +710,16 @@ class BypassVpnService : VpnService() {
                 appFilesDir?.let { dir ->
                     FileOutputStream(File(dir, LOG_FILE_NAME), true).use { fos ->
                         fos.write("$entry\n".toByteArray(Charsets.UTF_8))
-                        fos.flush()
-                        fos.fd.sync()
                     }
                 }
             } catch (_: Exception) {
             }
 
-            onLogListener?.invoke(getLogs())
+            val now = System.currentTimeMillis()
+            if (now - lastUiLogTime >= 250L) {
+                lastUiLogTime = now
+                onLogListener?.invoke(getLogs())
+            }
         }
 
         private fun notifyState(context: Context) {
