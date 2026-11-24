@@ -170,8 +170,7 @@ object LocalDpiProxy {
             prev = b
         }
 
-        val requestText = sb.toString()
-        val firstLine = requestText.lineSequence().firstOrNull().orEmpty()
+        val firstLine = sb.toString().lineSequence().firstOrNull().orEmpty()
         val parts = firstLine.split(' ')
         if (parts.size < 2 || !parts[0].equals("CONNECT", true)) return
 
@@ -302,7 +301,7 @@ object LocalDpiProxy {
                     out.write(data, offset, step)
                     out.flush()
                     offset += step
-                    if (offset < len && offset < 80) Thread.sleep(3)
+                    if (offset < len && offset < 96) Thread.sleep(3)
                 }
             }
         }
