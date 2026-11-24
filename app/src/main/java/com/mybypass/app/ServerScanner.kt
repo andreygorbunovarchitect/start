@@ -123,7 +123,6 @@ object ServerScanner {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val saved = prefs.getString("sub_url", "").orEmpty()
         if (saved.isBlank()) return getDefaultSubText()
-        // Убираем перегруженную базу Leon406 (19 222 ключа) и обновляем список источников
         if (saved.contains("Leon406", true) ||
             (!saved.contains("0xRadikal", true) && saved.contains("igareck", true))
         ) {
@@ -157,7 +156,7 @@ object ServerScanner {
 
     fun isLocalDpiEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean("local_dpi", false)
+            .getBoolean("local_dpi", true)
 
     fun isTgDirectEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -386,7 +385,6 @@ object ServerScanner {
                 return emptyList()
             }
 
-            // Квотирование: не даём зарубежным свалкам вытеснять РФ-совместимые базы
             val ruCompatPool = uniqueNodes.filter { it.isCurated }.shuffled().take(320)
             val foreignPool = uniqueNodes.filter { !it.isCurated }.shuffled().take(220)
             val candidates = (ruCompatPool + foreignPool).distinctBy { it.rawUri }
@@ -413,7 +411,6 @@ object ServerScanner {
             BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Этап 2A: быстрый отсев через Google...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            // Чередуем узлы из РФ-совместимых баз и зарубежных баз в пропорции 2:1
             val curatedAlive = tcpAlive.filter { it.first.isCurated }.map { it.first }.shuffled()
             val foreignAlive = tcpAlive.filter { !it.first.isCurated }.map { it.first }.shuffled()
             val interleaved = ArrayList<VlessNode>()
@@ -538,7 +535,6 @@ object ServerScanner {
                 return
             }
 
-            // Этап 2A: 1 лёгкий HTTPS-запрос к gstatic на узел (не забивает канал телефона)
             val gatePool = Executors.newFixedThreadPool(minOf(batch.size, 10))
             val aliveInBatch = Collections.synchronizedList(mutableListOf<Triple<VlessNode, Int, Long>>())
             try {
@@ -571,7 +567,6 @@ object ServerScanner {
 
             if (aliveInBatch.isEmpty() || cancelFlag.get()) return
 
-            // Этап 2B: глубокая проверка (Gemini, регион Google, YouTube, скорость) ТОЛЬКО для узлов, прошедших Этап 2A
             val deepPool = Executors.newFixedThreadPool(minOf(aliveInBatch.size, 4))
             try {
                 val deepTasks = aliveInBatch.map { (node, port, pingMs) ->
@@ -611,7 +606,6 @@ object ServerScanner {
     )
 
     private fun deepProbeAliveNode(node: VlessNode, socksPort: Int, pingMs: Long): ProbeResult {
-        // 1. Проверка региона через Cloudflare trace
         var countryCode = ""
         val (tr, _) = socks5hHttpsGet(socksPort, "chatgpt.com", "/cdn-cgi/trace", 1800, maxBodyBytes = 2048)
         if (tr != null && tr.code == 200) {
@@ -619,7 +613,6 @@ object ServerScanner {
         }
         val badGeo = countryCode.isNotBlank() && countryCode in BAD_GEO_CODES
 
-        // 2. Проверка региона глазами самого Google (gemini.google.com/app)
         var geminiOk = false
         if (!badGeo && !cancelFlag.get()) {
             val (gemResp, _) = socks5hHttpsGet(socksPort, "gemini.google.com", "/app", 2400, maxBodyBytes = 6144)
@@ -646,7 +639,6 @@ object ServerScanner {
             }
         }
 
-        // 3. Проверка YouTube и Telegram
         var ytOk = false
         if (!cancelFlag.get()) {
             val (ytResp, _) = socks5hHttpsGet(socksPort, "www.youtube.com", "/generate_204", 1800, maxBodyBytes = 0)
@@ -662,7 +654,6 @@ object ServerScanner {
             tgOk = tgResp != null && tgResp.code in 200..404
         }
 
-        // 4. Замер реальной скорости скачивания (64 КБ)
         var speedKbps = 0L
         if (!cancelFlag.get()) {
             val t0 = System.currentTimeMillis()
@@ -886,7 +877,7 @@ object ServerScanner {
             connectTimeout = 10000
             readTimeout = 12000
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "MyBypassXray/4.8")
+            setRequestProperty("User-Agent", "MyBypassXray/4.9")
         }
         return try {
             val code = conn.responseCode
