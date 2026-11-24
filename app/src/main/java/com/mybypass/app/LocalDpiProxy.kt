@@ -14,7 +14,7 @@ object LocalDpiProxy {
     val PROFILE_NAMES = listOf(
         "DPI 1: Split + Disorder (рекомендуется)",
         "DPI 2: Фрагментация по 2 байта",
-        "DPI 3: Мягкий Split (середина SNI)"
+        "DPI 3: Мягкий Split (граница SNI)"
     )
 
     private val running = AtomicBoolean(false)
@@ -75,9 +75,9 @@ object LocalDpiProxy {
             if (firstByte == -1) return
 
             if (firstByte == 0x05) {
-                handleSocks5(client, input, output)
+                handleSocks5(input, output) { sock -> remote = sock }
             } else {
-                handleHttpConnect(firstByte, client, input, output)
+                handleHttpConnect(firstByte, input, output) { sock -> remote = sock }
             }
         } catch (_: Exception) {
         } finally {
@@ -86,13 +86,16 @@ object LocalDpiProxy {
         }
     }
 
-    private fun handleSocks5(client: Socket, input: InputStream, output: OutputStream) {
+    private fun handleSocks5(
+        input: InputStream,
+        output: OutputStream,
+        onConnected: (Socket) -> Unit
+    ) {
         val nMethods = input.read()
         if (nMethods <= 0) return
         val methods = ByteArray(nMethods)
         if (!readFully(input, methods, nMethods)) return
 
-        // Без авторизации (0x00)
         output.write(byteArrayOf(0x05, 0x00))
         output.flush()
 
@@ -107,24 +110,23 @@ object LocalDpiProxy {
             return
         }
 
-        val targetHost: String
-        when (atyp) {
+        val targetHost: String = when (atyp) {
             0x01 -> {
                 val ip = ByteArray(4)
                 if (!readFully(input, ip, 4)) return
-                targetHost = InetAddress.getByAddress(ip).hostAddress.orEmpty()
+                InetAddress.getByAddress(ip).hostAddress.orEmpty()
             }
             0x03 -> {
                 val lenByte = input.read()
                 if (lenByte <= 0) return
                 val dom = ByteArray(lenByte)
                 if (!readFully(input, dom, lenByte)) return
-                targetHost = String(dom, Charsets.UTF_8)
+                String(dom, Charsets.UTF_8)
             }
             0x04 -> {
                 val ip6 = ByteArray(16)
                 if (!readFully(input, ip6, 16)) return
-                targetHost = InetAddress.getByAddress(ip6).hostAddress.orEmpty()
+                InetAddress.getByAddress(ip6).hostAddress.orEmpty()
             }
             else -> return
         }
@@ -133,24 +135,25 @@ object LocalDpiProxy {
         if (!readFully(input, portBuf, 2)) return
         val targetPort = ((portBuf[0].toInt() and 0xFF) shl 8) or (portBuf[1].toInt() and 0xFF)
 
-        val remote = connectWithDpiBypass(targetHost, targetPort)
+        val remote = connectDirect(targetHost, targetPort)
         if (remote == null) {
             output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
             return
         }
+        onConnected(remote)
 
         output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0))
         output.flush()
 
-        relayWithDesync(client, remote, currentProfile)
+        relayWithDesync(input, output, remote, currentProfile)
     }
 
     private fun handleHttpConnect(
         firstByte: Int,
-        client: Socket,
         input: InputStream,
-        output: OutputStream
+        output: OutputStream,
+        onConnected: (Socket) -> Unit
     ) {
         val sb = StringBuilder()
         sb.append(firstByte.toChar())
@@ -164,8 +167,7 @@ object LocalDpiProxy {
             prev = b
         }
 
-        val requestText = sb.toString()
-        val firstLine = requestText.lineSequence().firstOrNull().orEmpty()
+        val firstLine = sb.toString().lineSequence().firstOrNull().orEmpty()
         val parts = firstLine.split(' ')
         if (parts.size < 2 || !parts[0].equals("CONNECT", true)) return
 
@@ -174,20 +176,21 @@ object LocalDpiProxy {
         val targetHost = if (colonIdx > 0) authority.substring(0, colonIdx) else authority
         val targetPort = if (colonIdx > 0) authority.substring(colonIdx + 1).toIntOrNull() ?: 443 else 443
 
-        val remote = connectWithDpiBypass(targetHost, targetPort)
+        val remote = connectDirect(targetHost, targetPort)
         if (remote == null) {
             output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
             output.flush()
             return
         }
+        onConnected(remote)
 
         output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
         output.flush()
 
-        relayWithDesync(client, remote, currentProfile)
+        relayWithDesync(input, output, remote, currentProfile)
     }
 
-    private fun connectWithDpiBypass(host: String, port: Int): Socket? {
+    private fun connectDirect(host: String, port: Int): Socket? {
         return try {
             val addr = InetAddress.getByName(host)
             val sock = Socket()
@@ -200,9 +203,12 @@ object LocalDpiProxy {
         }
     }
 
-    private fun relayWithDesync(client: Socket, remote: Socket, profile: Int) {
-        val cIn = client.getInputStream()
-        val cOut = client.getOutputStream()
+    private fun relayWithDesync(
+        cIn: InputStream,
+        cOut: OutputStream,
+        remote: Socket,
+        profile: Int
+    ) {
         val rIn = remote.getInputStream()
         val rOut = remote.getOutputStream()
 
@@ -238,7 +244,7 @@ object LocalDpiProxy {
                 }
             } catch (_: Exception) {
             } finally {
-                try { client.shutdownOutput() } catch (_: Exception) {}
+                try { cOut.flush() } catch (_: Exception) {}
             }
         }.apply { isDaemon = true }
 
@@ -256,7 +262,6 @@ object LocalDpiProxy {
         }
 
         when (profile) {
-            // Профиль 1: Split + Disorder (разбиваем TLS ClientHello и отправляем вторую часть раньше первой)
             0 -> {
                 val splitAt = minOf(5, len / 2)
                 out.write(data, splitAt, len - splitAt)
@@ -265,7 +270,6 @@ object LocalDpiProxy {
                 out.write(data, 0, splitAt)
                 out.flush()
             }
-            // Профиль 2: мелкая фрагментация по 2 байта
             1 -> {
                 var offset = 0
                 while (offset < len) {
@@ -276,7 +280,6 @@ object LocalDpiProxy {
                     if (offset < len && offset < 64) Thread.sleep(2)
                 }
             }
-            // Профиль 3: мягкий Split по границе SNI
             else -> {
                 val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
                 out.write(data, 0, splitAt)
