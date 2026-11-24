@@ -58,22 +58,129 @@ object VlessParser {
             url.contains("Hidashimora/free-vpn-anti-rkn/", ignoreCase = true)
     }
 
-    val DPI_DOMAINS = listOf(
+    val YOUTUBE_DOMAINS = listOf(
         "domain:youtube.com",
         "domain:youtu.be",
         "domain:googlevideo.com",
         "domain:ytimg.com",
         "domain:youtube-nocookie.com",
         "domain:yt.be",
+        "domain:ggpht.com"
+    )
+
+    val TELEGRAM_DOMAINS = listOf(
+        "domain:telegram.org",
+        "domain:t.me",
+        "domain:tdesktop.com",
+        "domain:telegra.ph",
+        "domain:telesco.pe",
+        "domain:tx.me",
+        "domain:telegram.me",
+        "domain:telegram.dog",
+        "domain:cdn-telegram.org",
+        "domain:fragment.com"
+    )
+
+    val TELEGRAM_IP_CIDRS = listOf(
+        "91.108.4.0/22",
+        "91.108.8.0/22",
+        "91.108.12.0/22",
+        "91.108.16.0/22",
+        "91.108.20.0/22",
+        "91.108.56.0/22",
+        "91.105.192.0/23",
+        "149.154.160.0/20",
+        "185.76.151.0/24",
+        "95.161.64.0/20"
+    )
+
+    val AI_AND_SOCIAL_DOMAINS = listOf(
+        "domain:google.com",
+        "domain:google.ru",
+        "domain:googleapis.com",
+        "domain:gstatic.com",
+        "domain:googleusercontent.com",
+        "domain:google.dev",
+        "domain:g.co",
+        "domain:goo.gl",
+        "domain:withgoogle.com",
+        "domain:labs.google",
+        "domain:notebooklm.google",
+        "domain:deepmind.google",
+        "domain:deepmind.com",
+        "domain:firebaseapp.com",
+        "domain:appspot.com",
+        "domain:recaptcha.net",
+        "domain:1e100.net",
+        "domain:gvt1.com",
+        "domain:gvt2.com",
+        "domain:gvt3.com",
+        "domain:openai.com",
+        "domain:chatgpt.com",
+        "domain:oaistatic.com",
+        "domain:oaiusercontent.com",
+        "domain:sora.com",
+        "domain:auth0.com",
+        "domain:claude.ai",
+        "domain:anthropic.com",
+        "domain:perplexity.ai",
+        "domain:copilot.microsoft.com",
+        "domain:midjourney.com",
+        "domain:grok.com",
+        "domain:x.ai",
+        "domain:huggingface.co",
+        "domain:civitai.com",
+        "domain:cursor.com",
+        "domain:cursor.sh",
+        "domain:elevenlabs.io",
+        "domain:suno.com",
+        "domain:runwayml.com",
+        "domain:klingai.com",
+        "domain:lumalabs.ai",
+        "domain:recraft.ai",
+        "domain:ideogram.ai",
         "domain:discord.com",
         "domain:discord.gg",
         "domain:discordapp.com",
         "domain:discordapp.net",
         "domain:discord.media",
-        "domain:discordcdn.com"
+        "domain:discordcdn.com",
+        "domain:hcaptcha.com",
+        "domain:challenges.cloudflare.com",
+        "domain:instagram.com",
+        "domain:cdninstagram.com",
+        "domain:threads.net",
+        "domain:threads.com",
+        "domain:facebook.com",
+        "domain:fb.com",
+        "domain:fb.me",
+        "domain:fbcdn.net",
+        "domain:fbsbx.com",
+        "domain:messenger.com",
+        "domain:meta.com",
+        "domain:meta.ai",
+        "domain:whatsapp.com",
+        "domain:whatsapp.net",
+        "domain:wa.me",
+        "domain:x.com",
+        "domain:twitter.com",
+        "domain:twimg.com",
+        "domain:t.co",
+        "domain:linkedin.com",
+        "domain:licdn.com",
+        "domain:spotify.com",
+        "domain:scdn.co",
+        "domain:notion.so",
+        "domain:figma.com",
+        "domain:soundcloud.com",
+        "domain:patreon.com",
+        "domain:medium.com",
+        "domain:2ip.io",
+        "domain:whoer.net",
+        "domain:ifconfig.me",
+        "domain:ipinfo.io"
     )
 
-    // Блокируем QUIC только для Google и YouTube (Meta и мессенджеры не блокируем)
     val QUIC_BLOCK_DOMAINS = listOf(
         "domain:google.com",
         "domain:google.ru",
@@ -109,137 +216,7 @@ object VlessParser {
         "domain:steamstatic.com"
     )
 
-    val PROXY_DOMAINS = listOf(
-        "domain:google.com",
-        "domain:google.ru",
-        "domain:googleapis.com",
-        "domain:gstatic.com",
-        "domain:googleusercontent.com",
-        "domain:ggpht.com",
-        "domain:google.dev",
-        "domain:g.co",
-        "domain:goo.gl",
-        "domain:withgoogle.com",
-        "domain:labs.google",
-        "domain:notebooklm.google",
-        "domain:deepmind.google",
-        "domain:deepmind.com",
-        "domain:firebaseapp.com",
-        "domain:appspot.com",
-        "domain:recaptcha.net",
-        "domain:1e100.net",
-        "domain:gvt1.com",
-        "domain:gvt2.com",
-        "domain:gvt3.com",
-        "domain:google-analytics.com",
-        "domain:googletagmanager.com",
-        "domain:googleadservices.com",
-        "domain:googlesyndication.com",
-        "domain:doubleclick.net",
-        "domain:youtube.com",
-        "domain:youtu.be",
-        "domain:googlevideo.com",
-        "domain:ytimg.com",
-        "domain:youtube-nocookie.com",
-        "domain:yt.be",
-        "domain:openai.com",
-        "domain:chatgpt.com",
-        "domain:oaistatic.com",
-        "domain:oaiusercontent.com",
-        "domain:sora.com",
-        "domain:auth0.com",
-        "domain:claude.ai",
-        "domain:anthropic.com",
-        "domain:perplexity.ai",
-        "domain:copilot.microsoft.com",
-        "domain:midjourney.com",
-        "domain:grok.com",
-        "domain:x.ai",
-        "domain:huggingface.co",
-        "domain:civitai.com",
-        "domain:cursor.com",
-        "domain:cursor.sh",
-        "domain:elevenlabs.io",
-        "domain:suno.com",
-        "domain:runwayml.com",
-        "domain:klingai.com",
-        "domain:lumalabs.ai",
-        "domain:recraft.ai",
-        "domain:ideogram.ai",
-        "domain:discord.com",
-        "domain:discord.gg",
-        "domain:discordapp.com",
-        "domain:discordapp.net",
-        "domain:discord.media",
-        "domain:discord.co",
-        "domain:discord.new",
-        "domain:discord.gift",
-        "domain:discord.gifts",
-        "domain:discordstatus.com",
-        "domain:dis.gd",
-        "domain:discordcdn.com",
-        "domain:hcaptcha.com",
-        "domain:challenges.cloudflare.com",
-        "domain:instagram.com",
-        "domain:cdninstagram.com",
-        "domain:threads.net",
-        "domain:threads.com",
-        "domain:facebook.com",
-        "domain:fb.com",
-        "domain:fb.me",
-        "domain:fbcdn.net",
-        "domain:fbsbx.com",
-        "domain:messenger.com",
-        "domain:meta.com",
-        "domain:meta.ai",
-        "domain:whatsapp.com",
-        "domain:whatsapp.net",
-        "domain:wa.me",
-        "domain:telegram.org",
-        "domain:t.me",
-        "domain:tdesktop.com",
-        "domain:telegra.ph",
-        "domain:telesco.pe",
-        "domain:tx.me",
-        "domain:telegram.me",
-        "domain:telegram.dog",
-        "domain:cdn-telegram.org",
-        "domain:fragment.com",
-        "domain:x.com",
-        "domain:twitter.com",
-        "domain:twimg.com",
-        "domain:t.co",
-        "domain:linkedin.com",
-        "domain:licdn.com",
-        "domain:spotify.com",
-        "domain:scdn.co",
-        "domain:notion.so",
-        "domain:figma.com",
-        "domain:soundcloud.com",
-        "domain:patreon.com",
-        "domain:medium.com",
-        "domain:intel.com",
-        "domain:nvidia.com",
-        "domain:rutracker.org",
-        "domain:nnmclub.to",
-        "domain:kinozal.tv",
-        "domain:2ip.io",
-        "domain:whoer.net",
-        "domain:ifconfig.me",
-        "domain:ipinfo.io"
-    )
-
-    val PROXY_IP_CIDRS = listOf(
-        "91.108.4.0/22",
-        "91.108.8.0/22",
-        "91.108.12.0/22",
-        "91.108.16.0/22",
-        "91.108.20.0/22",
-        "91.108.56.0/22",
-        "91.105.192.0/23",
-        "149.154.160.0/20",
-        "185.76.151.0/24",
-        "95.161.64.0/20",
+    val VOICE_IP_CIDRS = listOf(
         "66.22.192.0/18",
         "138.128.136.0/21",
         "162.159.128.0/20"
@@ -374,12 +351,14 @@ object VlessParser {
 
     fun buildXrayConfig(
         node: VlessNode,
+        mediaNode: VlessNode? = null,
         socksPort: Int = 1080,
         smartBypass: Boolean = true,
         splitRu: Boolean = true,
         blockQuic: Boolean = true,
-        useLocalDpi: Boolean = true,
+        useLocalDpi: Boolean = false,
         dpiPort: Int = 1081,
+        tgDirect: Boolean = true,
         isTestMode: Boolean = false
     ): String {
         val root = JSONObject()
@@ -418,21 +397,36 @@ object VlessParser {
                     put("skipFallback", true)
                 })
             }
+            if (mediaNode != null && mediaNode.host != node.host && !isIpAddress(mediaNode.host)) {
+                dnsServers.put(JSONObject().apply {
+                    put("address", "77.88.8.8")
+                    put("domains", JSONArray().put("full:${mediaNode.host}"))
+                    put("skipFallback", true)
+                })
+            }
 
             if (useLocalDpi) {
                 dnsServers.put(JSONObject().apply {
                     put("address", "77.88.8.8")
-                    put("domains", JSONArray(DPI_DOMAINS))
+                    put("domains", JSONArray(YOUTUBE_DOMAINS))
+                    put("skipFallback", true)
+                })
+            }
+
+            if (tgDirect) {
+                dnsServers.put(JSONObject().apply {
+                    put("address", "77.88.8.8")
+                    put("domains", JSONArray(TELEGRAM_DOMAINS))
                     put("skipFallback", true)
                 })
             }
 
             if (smartBypass) {
-                val fakeTargets = if (useLocalDpi) {
-                    PROXY_DOMAINS.filterNot { it in DPI_DOMAINS }
-                } else {
-                    PROXY_DOMAINS
-                }
+                val fakeTargets = ArrayList<String>()
+                fakeTargets.addAll(AI_AND_SOCIAL_DOMAINS)
+                if (!useLocalDpi) fakeTargets.addAll(YOUTUBE_DOMAINS)
+                if (!tgDirect) fakeTargets.addAll(TELEGRAM_DOMAINS)
+
                 dnsServers.put(JSONObject().apply {
                     put("address", "fakedns")
                     put("domains", JSONArray(fakeTargets))
@@ -480,7 +474,13 @@ object VlessParser {
         root.put("inbounds", JSONArray().put(inbound))
 
         val outbounds = JSONArray()
-        outbounds.put(buildVlessOutbound(node))
+        outbounds.put(buildVlessOutbound(node, "proxy"))
+
+        val hasSeparateMedia = !isTestMode && mediaNode != null && mediaNode.rawUri != node.rawUri
+        if (hasSeparateMedia) {
+            outbounds.put(buildVlessOutbound(mediaNode!!, "media-proxy"))
+        }
+
         if (!isTestMode && useLocalDpi) {
             outbounds.put(JSONObject().apply {
                 put("tag", "dpi-out")
@@ -493,6 +493,7 @@ object VlessParser {
                 })
             })
         }
+
         outbounds.put(JSONObject().apply {
             put("tag", "direct")
             put("protocol", "freedom")
@@ -553,28 +554,46 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
+            val ytTag = when {
+                useLocalDpi -> "dpi-out"
+                hasSeparateMedia -> "media-proxy"
+                else -> "proxy"
+            }
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("domain", JSONArray(YOUTUBE_DOMAINS))
+                put("outboundTag", ytTag)
+            })
+
+            val tgTag = when {
+                tgDirect -> "direct"
+                hasSeparateMedia -> "media-proxy"
+                else -> "proxy"
+            }
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("domain", JSONArray(TELEGRAM_DOMAINS))
+                put("outboundTag", tgTag)
+            })
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("ip", JSONArray(TELEGRAM_IP_CIDRS))
+                put("outboundTag", tgTag)
+            })
+
+            rules.put(JSONObject().apply {
+                put("type", "field")
+                put("domain", JSONArray(AI_AND_SOCIAL_DOMAINS))
+                put("outboundTag", "proxy")
+            })
+
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("198.18.0.0/15"))
                 put("outboundTag", "proxy")
             })
 
-            if (useLocalDpi) {
-                rules.put(JSONObject().apply {
-                    put("type", "field")
-                    put("network", "tcp")
-                    put("domain", JSONArray(DPI_DOMAINS))
-                    put("outboundTag", "dpi-out")
-                })
-            }
-
             if (smartBypass) {
-                rules.put(JSONObject().apply {
-                    put("type", "field")
-                    put("domain", JSONArray(PROXY_DOMAINS))
-                    put("outboundTag", "proxy")
-                })
-
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("domain", JSONArray(DIRECT_DOMAINS))
@@ -583,10 +602,9 @@ object VlessParser {
 
                 rules.put(JSONObject().apply {
                     put("type", "field")
-                    put("ip", JSONArray(PROXY_IP_CIDRS))
+                    put("ip", JSONArray(VOICE_IP_CIDRS))
                     put("outboundTag", "proxy")
                 })
-
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("inboundTag", JSONArray().put("socks-in"))
@@ -601,11 +619,6 @@ object VlessParser {
                     put("outboundTag", "direct")
                 })
             } else {
-                rules.put(JSONObject().apply {
-                    put("type", "field")
-                    put("domain", JSONArray().put("domain:google.ru"))
-                    put("outboundTag", "proxy")
-                })
                 if (splitRu) {
                     rules.put(JSONObject().apply {
                         put("type", "field")
@@ -640,7 +653,7 @@ object VlessParser {
         return root.toString(2)
     }
 
-    private fun buildVlessOutbound(node: VlessNode): JSONObject {
+    private fun buildVlessOutbound(node: VlessNode, tagName: String): JSONObject {
         val user = JSONObject().apply {
             put("id", node.uuid)
             put("encryption", node.encryption)
@@ -741,7 +754,7 @@ object VlessParser {
         }
 
         return JSONObject().apply {
-            put("tag", "proxy")
+            put("tag", tagName)
             put("protocol", "vless")
             put("settings", JSONObject().apply {
                 put("vnext", JSONArray().put(vnextItem))
