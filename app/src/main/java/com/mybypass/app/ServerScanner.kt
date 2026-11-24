@@ -378,7 +378,6 @@ object ServerScanner {
             BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Быстрый тест Gemini/Flow, GPT, YT, Meta...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            // Быстрый срез из 90 лучших узлов для ускорения прохода
             val maxVerify = minOf(tcpAlive.size, 90)
             val toVerify = tcpAlive.take(maxVerify)
             val verified = Collections.synchronizedList(mutableListOf<TestedNode>())
@@ -397,7 +396,7 @@ object ServerScanner {
                             return@submit
                         }
                         val tempPort = portCounter.getAndIncrement()
-                        val (tested, fallback, diagErr) = verifySingleNode(context, node, tempPort)
+                        val (tested, fallback, diagErr) = verifySingleNodeInternal(context, node, tempPort)
                         val done = doneCount.incrementAndGet()
                         if (tested != null) {
                             verified.add(tested)
@@ -480,12 +479,7 @@ object ServerScanner {
 
         val testConfigFile = File(context.cacheDir, "xray_test_$tempPort.json")
         testConfigFile.writeText(
-            VlessParser.buildXrayConfig(
-                node = node,
-                socksPort = tempPort,
-                useLocalDpi = false,
-                isTestMode = true
-            )
+            VlessParser.buildXrayConfig(node = node, socksPort = tempPort, useLocalDpi = false, isTestMode = true)
         )
 
         var proc: Process? = null
