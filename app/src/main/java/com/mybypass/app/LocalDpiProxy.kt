@@ -73,6 +73,18 @@ object LocalDpiProxy {
                 .start()
             nativeProcess = proc
 
+            // Вычитываем stdout/stderr, чтобы буфер трубы ОС не переполнялся при долгой работе
+            Thread {
+                try {
+                    val buf = ByteArray(1024)
+                    val inp = proc.inputStream
+                    while (inp.read(buf) != -1) {
+                        // discard output
+                    }
+                } catch (_: Exception) {
+                }
+            }.apply { isDaemon = true }.start()
+
             for (i in 0 until 10) {
                 if (!proc.isAlive) return false
                 if (ServerScanner.tcpPing("127.0.0.1", port, 80) >= 0) {
