@@ -46,7 +46,7 @@ class BypassVpnService : VpnService() {
 
                 if (!ensureForeground("Проверка и подключение...")) return START_NOT_STICKY
                 isAutoSearching = true
-                searchStatusText = "Проверка сервера..."
+                searchStatusText = "Проверка каналов..."
                 notifyState(applicationContext)
 
                 executor.execute {
@@ -55,9 +55,9 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_AUTO_CONNECT -> {
-                if (!ensureForeground("Автоподбор лучшего сервера...")) return START_NOT_STICKY
+                if (!ensureForeground("Автоподбор раздельных каналов...")) return START_NOT_STICKY
                 isAutoSearching = true
-                searchStatusText = "Проверка сервера..."
+                searchStatusText = "Проверка каналов..."
                 notifyState(applicationContext)
 
                 executor.execute {
@@ -66,7 +66,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_RESCAN_AND_CONNECT -> {
-                if (!ensureForeground("Поиск лучшего сервера (Gemini + ИИ)...")) return START_NOT_STICKY
+                if (!ensureForeground("Поиск серверов для каналов...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Загрузка баз..."
                 notifyState(applicationContext)
@@ -87,6 +87,25 @@ class BypassVpnService : VpnService() {
         }
         return START_STICKY
     }
+
+    /** Подбираем и проверяем живой второй узел для YouTube, чтобы не грузить основной канал ИИ */
+    private fun pickVerifiedMediaNode(primary: VlessNode): VlessNode? {
+        val list = ServerScanner.loadWorkingList(applicationContext)
+        val candidates = list
+            .filter { it.node.rawUri != primary.rawUri }
+            .sortedByDescending { it.ytOk }
+            .take(4)
+
+        for (cand in candidates) {
+            val p = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10826)
+            if (p > 0) return cand.node
+        }
+        return null
+    }
+
+    private fun isTgDirectEnabled(): Boolean =
+        applicationContext.getSharedPreferences(ServerScanner.PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean("tg_direct", true)
 
     private fun handleStartWithPrecheck(rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
         try {
@@ -109,11 +128,11 @@ class BypassVpnService : VpnService() {
                 searchStatusText = "Проверка ${target.node.name.take(14)}..."
                 updateNotification("Проверка: ${target.node.name.take(24)}")
                 notifyState(applicationContext)
-                log("Проверка доступности сервера: ${target.shortTitle()}...")
+                log("Проверка канала ИИ: ${target.shortTitle()}...")
 
                 val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824)
                 if (livePing < 0) {
-                    log("Сервер перестал отвечать. Ищу живой в списке...")
+                    log("Узел перестал отвечать. Ищу замену в списке...")
                     val savedList = ServerScanner.loadWorkingList(applicationContext)
                     var replacement: TestedNode? = null
                     var checked = 0
@@ -131,7 +150,7 @@ class BypassVpnService : VpnService() {
                     if (replacement != null) {
                         target = replacement
                         ServerScanner.saveSelectedNode(applicationContext, replacement)
-                        log("Автопереключение на живой сервер: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
+                        log("Автопереключение канала ИИ: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
                     } else {
                         log("Сохранённые серверы устарели -> запускаю свежий автопоиск...")
                         handleAutoConnect(forceRescan = true)
@@ -140,7 +159,7 @@ class BypassVpnService : VpnService() {
                 } else {
                     target = target.copy(pingMs = livePing)
                     ServerScanner.saveSelectedNode(applicationContext, target)
-                    log("Сервер жив (${livePing}мс). Подключаю...")
+                    log("Канал ИИ жив (${livePing}мс).")
                 }
             }
 
@@ -149,19 +168,24 @@ class BypassVpnService : VpnService() {
 
             val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
             val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
+            val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(target.node) else null
+            val tgDirect = isTgDirectEnabled()
+
             val configJson = VlessParser.buildXrayConfig(
                 node = target.node,
+                mediaNode = mediaNode,
                 socksPort = 1080,
                 smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
                 splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
                 blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
                 useLocalDpi = useLocalDpi,
                 dpiPort = 1081,
+                tgDirect = tgDirect,
                 isTestMode = false
             )
             val label = target.shortTitle()
             updateNotification(label)
-            startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile)
+            startTunnel(configJson, label, blockIpv6, useLocalDpi, dpiProfile, mediaNode, tgDirect)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -183,15 +207,15 @@ class BypassVpnService : VpnService() {
                     searchStatusText = "Проверка ${preferred.node.name.take(14)}..."
                     updateNotification("Проверка: ${preferred.node.name.take(24)}")
                     notifyState(applicationContext)
-                    log("Быстрая проверка сервера: ${preferred.shortTitle()}...")
+                    log("Быстрая проверка канала ИИ: ${preferred.shortTitle()}...")
 
                     val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825)
                     if (livePing > 0) {
                         chosen = preferred.copy(pingMs = livePing)
                         ServerScanner.saveSelectedNode(applicationContext, chosen)
-                        log("Сервер жив (${livePing}мс): ${chosen.shortTitle()}")
+                        log("Канал ИИ жив (${livePing}мс): ${chosen.shortTitle()}")
                     } else {
-                        log("Сервер не отвечает -> запускаю свежий автопоиск...")
+                        log("Узел не отвечает -> запускаю свежий автопоиск...")
                     }
                 }
             }
@@ -225,19 +249,24 @@ class BypassVpnService : VpnService() {
 
             val dpiProfile = ServerScanner.getDpiProfileIndex(applicationContext)
             val useLocalDpi = ServerScanner.isLocalDpiEnabled(applicationContext) && dpiProfile != 3
+            val mediaNode = if (!useLocalDpi) pickVerifiedMediaNode(chosen.node) else null
+            val tgDirect = isTgDirectEnabled()
+
             val configJson = VlessParser.buildXrayConfig(
                 node = chosen.node,
+                mediaNode = mediaNode,
                 socksPort = 1080,
                 smartBypass = ServerScanner.isSmartBypassEnabled(applicationContext),
                 splitRu = ServerScanner.isSplitRuEnabled(applicationContext),
                 blockQuic = ServerScanner.isBlockQuicEnabled(applicationContext),
                 useLocalDpi = useLocalDpi,
                 dpiPort = 1081,
+                tgDirect = tgDirect,
                 isTestMode = false
             )
             val label = chosen.shortTitle()
             updateNotification(label)
-            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext), useLocalDpi, dpiProfile)
+            startTunnel(configJson, label, ServerScanner.isBlockIpv6Enabled(applicationContext), useLocalDpi, dpiProfile, mediaNode, tgDirect)
         } catch (e: Throwable) {
             isAutoSearching = false
             searchStatusText = ""
@@ -251,7 +280,9 @@ class BypassVpnService : VpnService() {
         serverName: String,
         blockIpv6: Boolean,
         useLocalDpi: Boolean,
-        dpiProfile: Int
+        dpiProfile: Int,
+        mediaNode: VlessNode?,
+        tgDirect: Boolean
     ) {
         if (configJson.isBlank()) {
             log("ОШИБКА: пустая конфигурация Xray.")
@@ -260,10 +291,7 @@ class BypassVpnService : VpnService() {
         }
 
         if (useLocalDpi) {
-            val dpiOk = LocalDpiProxy.start(port = 1081, profileIndex = dpiProfile)
-            if (dpiOk) {
-                log("Локальный DPI-обход активен (${LocalDpiProxy.PROFILE_NAMES[LocalDpiProxy.currentProfile]})")
-            }
+            LocalDpiProxy.start(port = 1081, profileIndex = dpiProfile)
         }
 
         val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
@@ -379,8 +407,14 @@ class BypassVpnService : VpnService() {
             activeServerName = serverName
             updateNotification(serverName)
             notifyState(applicationContext)
-            val modeStr = if (ServerScanner.isSmartBypassEnabled(applicationContext)) "Умный обход + FakeDNS" else "Полный VPN"
-            log("VPN дяди Андрея активен [$modeStr]: $serverName")
+
+            val ytChannel = when {
+                useLocalDpi -> "Локальный DPI"
+                mediaNode != null -> mediaNode.name.take(16)
+                else -> "Основной VLESS"
+            }
+            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через медиа-канал"
+            log("Каналы разделены: ИИ/Meta -> $serverName | YouTube -> $ytChannel | Telegram -> $tgChannel")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
             stopTunnelInternal(stopService = true)
@@ -590,7 +624,7 @@ class BypassVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
             }
-            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать быстрый сервер с Gemini и ИИ." }
+            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать серверы для каналов." }
         }
 
         @Synchronized
