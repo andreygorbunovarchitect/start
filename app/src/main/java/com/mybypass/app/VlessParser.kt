@@ -39,19 +39,38 @@ object VlessParser {
         "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran)([^a-z]|$)"
     )
 
-    // Только отобранные и регулярно обновляемые базы под РФ
     val ALL_FREE_URLS = listOf(
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
-        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt",
-        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
+        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt",
+        "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
+        "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt",
+        "https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/26.1.txt",
+        "https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt"
     )
 
     fun isCuratedUrl(url: String): Boolean {
         return url.contains("igareck/", ignoreCase = true) ||
-            url.contains("patterniha/", ignoreCase = true)
+            url.contains("patterniha/", ignoreCase = true) ||
+            url.contains("zieng2/wl/", ignoreCase = true) ||
+            url.contains("aviamastersgh/vpn-free-russia/", ignoreCase = true) ||
+            url.contains("Hidashimora/free-vpn-anti-rkn/", ignoreCase = true)
     }
+
+    val DPI_DOMAINS = listOf(
+        "domain:youtube.com",
+        "domain:youtu.be",
+        "domain:googlevideo.com",
+        "domain:ytimg.com",
+        "domain:youtube-nocookie.com",
+        "domain:discord.com",
+        "domain:discord.gg",
+        "domain:discordapp.com",
+        "domain:discordapp.net",
+        "domain:discord.media",
+        "domain:discordcdn.com"
+    )
 
     val DIRECT_DOMAINS = listOf(
         "domain:ru",
@@ -79,7 +98,6 @@ object VlessParser {
     )
 
     val PROXY_DOMAINS = listOf(
-        // Полная экосистема Google (Gemini, Flow, Nano Banana, AI Studio, NotebookLM, авторизация, API, YouTube)
         "domain:google.com",
         "domain:google.ru",
         "domain:googleapis.com",
@@ -112,7 +130,6 @@ object VlessParser {
         "domain:ytimg.com",
         "domain:youtube-nocookie.com",
         "domain:yt.be",
-        // OpenAI / ChatGPT и другие нейросети
         "domain:openai.com",
         "domain:chatgpt.com",
         "domain:oaistatic.com",
@@ -137,7 +154,6 @@ object VlessParser {
         "domain:lumalabs.ai",
         "domain:recraft.ai",
         "domain:ideogram.ai",
-        // Discord
         "domain:discord.com",
         "domain:discord.gg",
         "domain:discordapp.com",
@@ -152,7 +168,6 @@ object VlessParser {
         "domain:discordcdn.com",
         "domain:hcaptcha.com",
         "domain:challenges.cloudflare.com",
-        // Meta (Instagram, Threads, Facebook, WhatsApp)
         "domain:instagram.com",
         "domain:cdninstagram.com",
         "domain:threads.net",
@@ -168,7 +183,6 @@ object VlessParser {
         "domain:whatsapp.com",
         "domain:whatsapp.net",
         "domain:wa.me",
-        // Telegram
         "domain:telegram.org",
         "domain:t.me",
         "domain:tdesktop.com",
@@ -179,7 +193,6 @@ object VlessParser {
         "domain:telegram.dog",
         "domain:cdn-telegram.org",
         "domain:fragment.com",
-        // Соцсети и зарубежные сервисы
         "domain:x.com",
         "domain:twitter.com",
         "domain:twimg.com",
@@ -353,6 +366,8 @@ object VlessParser {
         smartBypass: Boolean = true,
         splitRu: Boolean = true,
         blockQuic: Boolean = true,
+        useLocalDpi: Boolean = true,
+        dpiPort: Int = 1081,
         isTestMode: Boolean = false
     ): String {
         val root = JSONObject()
@@ -441,6 +456,18 @@ object VlessParser {
 
         val outbounds = JSONArray()
         outbounds.put(buildVlessOutbound(node))
+        if (!isTestMode && useLocalDpi) {
+            outbounds.put(JSONObject().apply {
+                put("tag", "dpi-out")
+                put("protocol", "socks")
+                put("settings", JSONObject().apply {
+                    put("servers", JSONArray().put(JSONObject().apply {
+                        put("address", "127.0.0.1")
+                        put("port", dpiPort)
+                    }))
+                })
+            })
+        }
         outbounds.put(JSONObject().apply {
             put("tag", "direct")
             put("protocol", "freedom")
@@ -506,6 +533,15 @@ object VlessParser {
                 put("ip", JSONArray().put("198.18.0.0/15"))
                 put("outboundTag", "proxy")
             })
+
+            // Локальный DPI-обход для YouTube и Discord на 100% скорости (не грузит бесплатный VLESS)
+            if (useLocalDpi) {
+                rules.put(JSONObject().apply {
+                    put("type", "field")
+                    put("domain", JSONArray(DPI_DOMAINS))
+                    put("outboundTag", "dpi-out")
+                })
+            }
 
             if (smartBypass) {
                 rules.put(JSONObject().apply {
