@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nextBtn: Button
     private lateinit var listBtn: Button
     private lateinit var subInput: EditText
+    private lateinit var warpCheck: CheckBox
     private lateinit var localDpiCheck: CheckBox
     private lateinit var dpiProfileSpinner: Spinner
     private lateinit var tgDirectCheck: CheckBox
@@ -54,8 +55,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingSkipCheck: Boolean = false
 
     private val subPresets = listOf(
-        "ВСЕ (14 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
-        "Зарубежные (6)" to VlessParser.FOREIGN_FREE_URLS.joinToString("\n"),
+        "ВСЕ (13 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
+        "Зарубежные (5)" to VlessParser.FOREIGN_FREE_URLS.joinToString("\n"),
         "РФ-совмест. (8)" to VlessParser.RU_COMPATIBLE_URLS.joinToString("\n"),
         "Reality Белые" to VlessParser.RU_COMPATIBLE_URLS[2],
         "Zieng2 Lite" to VlessParser.RU_COMPATIBLE_URLS[4]
@@ -163,7 +164,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        root.addView(sectionLabel("Базы бесплатных серверов GitHub (14 баз) или свой ключ"))
+        root.addView(sectionLabel("Базы бесплатных серверов GitHub (13 баз) или свой ключ"))
 
         val subScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -232,8 +233,17 @@ class MainActivity : AppCompatActivity() {
         actionRow.addView(listBtn, LinearLayout.LayoutParams(0, dp(42), 1.25f).apply { marginStart = dp(4) })
         root.addView(actionRow)
 
+        warpCheck = CheckBox(this).apply {
+            text = "Поток #1 ИИ: Cloudflare WARP поверх прокси (чистый IP для Gemini)"
+            isChecked = WarpManager.isWarpEnabled(this@MainActivity)
+            setTextColor(Color.parseColor("#FFCC80"))
+            textSize = 13f
+            setOnCheckedChangeListener { _, _ -> savePrefs() }
+        }
+        root.addView(warpCheck)
+
         localDpiCheck = CheckBox(this).apply {
-            text = "Поток #2 YouTube: локальный DPI (выкл. = отдельный сервер #2)"
+            text = "Поток #2 YouTube: нативный ByeDPI (быстрое видео без нагрузки на прокси)"
             isChecked = ServerScanner.isLocalDpiEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#81D4FA"))
             textSize = 13f
@@ -446,6 +456,7 @@ class MainActivity : AppCompatActivity() {
     private fun savePrefs() {
         getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).edit()
             .putString("sub_url", subInput.text.toString().trim())
+            .putBoolean("use_cf_warp", warpCheck.isChecked)
             .putBoolean("local_dpi", localDpiCheck.isChecked)
             .putInt("dpi_profile", dpiProfileSpinner.selectedItemPosition.coerceAtLeast(0))
             .putBoolean("tg_direct", tgDirectCheck.isChecked)
@@ -591,6 +602,7 @@ class MainActivity : AppCompatActivity() {
         }
         toggleBtn.gravity = Gravity.CENTER
         val editable = !running && !searching
+        warpCheck.isEnabled = editable
         localDpiCheck.isEnabled = editable
         dpiProfileSpinner.isEnabled = editable
         tgDirectCheck.isEnabled = editable
