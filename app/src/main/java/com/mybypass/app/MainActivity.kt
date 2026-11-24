@@ -14,12 +14,16 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +40,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nextBtn: Button
     private lateinit var listBtn: Button
     private lateinit var subInput: EditText
+    private lateinit var localDpiCheck: CheckBox
+    private lateinit var dpiProfileSpinner: Spinner
     private lateinit var smartBypassCheck: CheckBox
     private lateinit var aiCountryCheck: CheckBox
     private lateinit var splitRuCheck: CheckBox
@@ -50,11 +56,11 @@ class MainActivity : AppCompatActivity() {
     private var pendingSkipCheck: Boolean = false
 
     private val subPresets = listOf(
-        "ВСЕ (5 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
+        "ВСЕ (8 баз)" to VlessParser.ALL_FREE_URLS.joinToString("\n"),
         "Только РФ-базы (4)" to VlessParser.ALL_FREE_URLS.take(4).joinToString("\n"),
         "Igareck РФ" to VlessParser.ALL_FREE_URLS[0],
         "Reality Белые" to VlessParser.ALL_FREE_URLS[2],
-        "Patterniha" to VlessParser.ALL_FREE_URLS[3]
+        "Zieng2 Lite" to VlessParser.ALL_FREE_URLS[4]
     )
 
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -98,7 +104,7 @@ class MainActivity : AppCompatActivity() {
         outerScroll.addView(root)
 
         val title = TextView(this).apply {
-            text = "MyBypass Xray v4.2 (VLESS)"
+            text = "MyBypass Xray v4.3 (VLESS + DPI)"
             textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
@@ -158,7 +164,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ))
 
-        root.addView(sectionLabel("Базы бесплатных серверов GitHub (5 баз) или свой ключ vless://"))
+        root.addView(sectionLabel("Базы бесплатных серверов GitHub (8 баз) или свой ключ vless://"))
 
         val subScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val subRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -227,8 +233,41 @@ class MainActivity : AppCompatActivity() {
         actionRow.addView(listBtn, LinearLayout.LayoutParams(0, dp(42), 1.25f).apply { marginStart = dp(4) })
         root.addView(actionRow)
 
+        localDpiCheck = CheckBox(this).apply {
+            text = "Локальный DPI-обход (фрагментация для YT и Discord)"
+            isChecked = ServerScanner.isLocalDpiEnabled(this@MainActivity)
+            setTextColor(Color.parseColor("#81D4FA"))
+            textSize = 13f
+            setOnCheckedChangeListener { _, _ -> savePrefs() }
+        }
+        root.addView(localDpiCheck)
+
+        dpiProfileSpinner = Spinner(this).apply {
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                LocalDpiProxy.PROFILE_NAMES
+            )
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            this.adapter = adapter
+            setSelection(ServerScanner.getDpiProfileIndex(this@MainActivity).coerceIn(0, LocalDpiProxy.PROFILE_NAMES.lastIndex))
+            background = roundedBg("#25282C", dp(8).toFloat())
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    (view as? TextView)?.setTextColor(Color.WHITE)
+                    savePrefs()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+        root.addView(dpiProfileSpinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(42)
+        ).apply { topMargin = dp(4); bottomMargin = dp(4) })
+
         smartBypassCheck = CheckBox(this).apply {
-            text = "Умный обход + FakeDNS (быстрее: только ИИ, YT, Meta, TG, Discord через VPN)"
+            text = "Умный обход + FakeDNS (ИИ, Meta, TG через VPN; сеть напрямую)"
             isChecked = ServerScanner.isSmartBypassEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#A5D6A7"))
             textSize = 13f
@@ -406,6 +445,8 @@ class MainActivity : AppCompatActivity() {
     private fun savePrefs() {
         getSharedPreferences(ServerScanner.PREFS_NAME, MODE_PRIVATE).edit()
             .putString("sub_url", subInput.text.toString().trim())
+            .putBoolean("local_dpi", localDpiCheck.isChecked)
+            .putInt("dpi_profile", dpiProfileSpinner.selectedItemPosition.coerceAtLeast(0))
             .putBoolean("smart_bypass", smartBypassCheck.isChecked)
             .putBoolean("ai_country_filter", aiCountryCheck.isChecked)
             .putBoolean("split_ru", splitRuCheck.isChecked)
@@ -548,6 +589,8 @@ class MainActivity : AppCompatActivity() {
         }
         toggleBtn.gravity = Gravity.CENTER
         val editable = !running && !searching
+        localDpiCheck.isEnabled = editable
+        dpiProfileSpinner.isEnabled = editable
         smartBypassCheck.isEnabled = editable
         splitRuCheck.isEnabled = editable
         blockQuicCheck.isEnabled = editable
