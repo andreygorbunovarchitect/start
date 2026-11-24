@@ -118,7 +118,8 @@ object ServerScanner {
             prefs.edit().putString("sub_url", fresh).apply()
             return fresh
         }
-        return saved
+        val deduped = saved.lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        return if (deduped.isNotEmpty()) deduped.joinToString("\n") else getDefaultSubText()
     }
 
     fun isAiFilterEnabled(context: Context): Boolean =
@@ -140,6 +141,14 @@ object ServerScanner {
     fun isBlockIpv6Enabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean("block_ipv6", false)
+
+    fun isLocalDpiEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean("local_dpi", true)
+
+    fun getDpiProfileIndex(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt("dpi_profile", 0)
 
     fun saveWorkingList(context: Context, list: List<TestedNode>) {
         val arr = JSONArray()
@@ -226,7 +235,7 @@ object ServerScanner {
 
         val testConfigFile = File(context.cacheDir, "xray_live_$tempPort.json")
         testConfigFile.writeText(
-            VlessParser.buildXrayConfig(node = node, socksPort = tempPort, isTestMode = true)
+            VlessParser.buildXrayConfig(node = node, socksPort = tempPort, useLocalDpi = false, isTestMode = true)
         )
 
         var proc: Process? = null
@@ -247,7 +256,7 @@ object ServerScanner {
             if (!portReady) return -1L
 
             val start = System.currentTimeMillis()
-            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 4200, readBody = false)
+            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 3500, readBody = false)
             if (resp != null && resp.code in 200..399) {
                 (System.currentTimeMillis() - start).coerceAtLeast(1L)
             } else {
@@ -273,7 +282,7 @@ object ServerScanner {
         cancelFlag.set(false)
 
         try {
-            val lines = rawInput.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val lines = rawInput.lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
             val allParsed = LinkedHashMap<String, VlessNode>()
 
             val urls = lines.filter { it.startsWith("http://", true) || it.startsWith("https://", true) }
@@ -337,8 +346,8 @@ object ServerScanner {
             }
 
             val curatedNodes = uniqueNodes.filter { it.isCurated }.shuffled()
-            val otherNodes = uniqueNodes.filter { !it.isCurated }.shuffled().take(150)
-            val candidates = (curatedNodes + otherNodes).take(250)
+            val otherNodes = uniqueNodes.filter { !it.isCurated }.shuffled().take(120)
+            val candidates = (curatedNodes + otherNodes).take(260)
 
             notifyProgress("TCP-пинг ${candidates.size} узлов...")
             BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} узлов (${curatedNodes.size} из РФ-баз в приоритете)...")
@@ -368,7 +377,7 @@ object ServerScanner {
             BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Тестирую Gemini (с API), Flow, GPT, YT, Meta...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            val maxVerify = minOf(tcpAlive.size, 120)
+            val maxVerify = minOf(tcpAlive.size, 90)
             val toVerify = tcpAlive.take(maxVerify)
             val verified = Collections.synchronizedList(mutableListOf<TestedNode>())
             val gemCount = AtomicInteger(0)
@@ -377,12 +386,12 @@ object ServerScanner {
             val firstCuratedErr = AtomicReference<String?>(null)
             val firstDiagErr = AtomicReference<String?>(null)
 
-            val xrayPool = Executors.newFixedThreadPool(6)
+            val xrayPool = Executors.newFixedThreadPool(4)
             try {
                 val tasks = toVerify.map { (node, _) ->
                     xrayPool.submit {
                         if (cancelFlag.get()) return@submit
-                        if (verified.size >= 25 || (gemCount.get() >= 4 && verified.size >= 10)) {
+                        if (verified.size >= 20 || (gemCount.get() >= 4 && verified.size >= 8)) {
                             return@submit
                         }
                         val tempPort = portCounter.getAndIncrement()
@@ -451,6 +460,7 @@ object ServerScanner {
             VlessParser.buildXrayConfig(
                 node = node,
                 socksPort = tempPort,
+                useLocalDpi = false,
                 isTestMode = true
             )
         )
@@ -753,7 +763,6 @@ object ServerScanner {
 
     fun tcpPing(host: String, port: Int, timeoutMs: Int): Long {
         return try {
-            // Резолвим DNS до запуска таймера, чтобы задержка DNS не отбрасывала доменные серверы
             val addr = InetAddress.getByName(host)
             val start = System.currentTimeMillis()
             Socket().use { socket ->
