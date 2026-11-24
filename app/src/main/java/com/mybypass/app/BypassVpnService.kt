@@ -79,7 +79,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_RESCAN_AND_CONNECT -> {
-                if (!ensureForeground("Поиск зарубежных серверов...")) return START_NOT_STICKY
+                if (!ensureForeground("Поиск серверов...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Загрузка баз..."
                 notifyState(applicationContext)
@@ -111,7 +111,7 @@ class BypassVpnService : VpnService() {
             try {
                 if (!isRunning || isAutoSearching) return@scheduleWithFixedDelay
                 val active = currentActiveNode ?: return@scheduleWithFixedDelay
-                val ping = ServerScanner.quickLiveCheckNode(applicationContext, active.node, 10828, timeoutMs = 5000)
+                val ping = ServerScanner.quickLiveCheckNode(applicationContext, active.node, 10828, timeoutMs = 4500)
                 if (ping > 0) {
                     consecutiveWatchdogFails = 0
                     return@scheduleWithFixedDelay
@@ -121,7 +121,7 @@ class BypassVpnService : VpnService() {
                 if (consecutiveWatchdogFails < 3) return@scheduleWithFixedDelay
 
                 consecutiveWatchdogFails = 0
-                log("Сторож: поток #1 перестал отвечать 3 раза подряд -> ищу равноценную замену...")
+                log("Сторож: поток #1 не отвечает 3 раза подряд -> ищу замену...")
                 val list = ServerScanner.loadWorkingList(applicationContext)
                 val candidates = list
                     .filter { it.node.rawUri != active.node.rawUri }
@@ -130,7 +130,7 @@ class BypassVpnService : VpnService() {
 
                 var replacement: TestedNode? = null
                 for (cand in candidates) {
-                    val np = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10828, timeoutMs = 4000)
+                    val np = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10828, timeoutMs = 3500)
                     if (np > 0) {
                         replacement = cand.copy(pingMs = np)
                         break
@@ -150,7 +150,7 @@ class BypassVpnService : VpnService() {
                 }
             } catch (_: Exception) {
             }
-        }, 60L, 60L, TimeUnit.SECONDS)
+        }, 75L, 75L, TimeUnit.SECONDS)
     }
 
     private fun stopWatchdog() {
@@ -171,7 +171,7 @@ class BypassVpnService : VpnService() {
         val list = ServerScanner.loadWorkingList(applicationContext)
             .filter { it.node.rawUri != primary.rawUri }
             .sortedWith(compareByDescending<TestedNode> { it.speedKbps }.thenBy { it.pingMs })
-            .take(5)
+            .take(4)
 
         var mediaNode: VlessNode? = null
         var tgNode: VlessNode? = null
@@ -179,7 +179,7 @@ class BypassVpnService : VpnService() {
 
         for (cand in list) {
             if ((!needMedia || mediaNode != null) && (!needTg || tgNode != null)) break
-            val p = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, checkPort++, timeoutMs = 3000)
+            val p = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, checkPort++, timeoutMs = 2500)
             if (p > 0) {
                 if (needMedia && mediaNode == null) {
                     mediaNode = cand.node
@@ -270,35 +270,13 @@ class BypassVpnService : VpnService() {
                 notifyState(applicationContext)
                 log("Проверка потока #1: ${target.shortTitle()}...")
 
-                val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824, timeoutMs = 3500)
+                val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824, timeoutMs = 3000)
                 if (gen != commandGen.get()) return
 
                 if (livePing < 0) {
-                    log("Узел #1 не отвечает. Ищу живой в списке...")
-                    val savedList = ServerScanner.loadWorkingList(applicationContext)
-                    var replacement: TestedNode? = null
-                    var checked = 0
-                    for (cand in savedList) {
-                        if (gen != commandGen.get()) return
-                        if (cand.node.rawUri == target.node.rawUri) continue
-                        if (checked >= 6) break
-                        checked++
-                        val cp = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10824, timeoutMs = 3500)
-                        if (cp > 0) {
-                            replacement = cand.copy(pingMs = cp)
-                            break
-                        }
-                    }
-
-                    if (replacement != null) {
-                        target = replacement
-                        ServerScanner.saveSelectedNode(applicationContext, replacement)
-                        log("Переключился на живой узел: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
-                    } else {
-                        log("Живых сохранённых узлов нет -> запускаю свежий автопоиск...")
-                        handleAutoConnect(gen, forceRescan = true)
-                        return
-                    }
+                    log("Узел #1 не отвечает -> запускаю свежий автопоиск...")
+                    handleAutoConnect(gen, forceRescan = true)
+                    return
                 } else {
                     target = target.copy(pingMs = livePing)
                     ServerScanner.saveSelectedNode(applicationContext, target)
@@ -337,7 +315,7 @@ class BypassVpnService : VpnService() {
                     notifyState(applicationContext)
                     log("Проверка сохранённого узла: ${preferred.shortTitle()}...")
 
-                    val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825, timeoutMs = 3500)
+                    val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825, timeoutMs = 3000)
                     if (gen != commandGen.get()) return
                     if (livePing > 0) {
                         chosen = preferred.copy(pingMs = livePing)
@@ -424,14 +402,16 @@ class BypassVpnService : VpnService() {
         xrayConfigFile.writeText(configJson)
 
         try {
-            val proc = ProcessBuilder(
+            val pb = ProcessBuilder(
                 xrayBin.absolutePath,
                 "run",
                 "-c",
                 xrayConfigFile.absolutePath
-            )
-                .redirectErrorStream(true)
-                .start()
+            ).redirectErrorStream(true)
+            pb.environment()["TMPDIR"] = cacheDir.absolutePath
+            pb.environment()["HOME"] = filesDir.absolutePath
+
+            val proc = pb.start()
             xrayProcess = proc
 
             Thread {
@@ -439,7 +419,9 @@ class BypassVpnService : VpnService() {
                     BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                         var line: String?
                         while (reader.readLine().also { line = it } != null) {
-                            log("[xray] $line")
+                            if (line!!.contains("error", true) || line!!.contains("panic", true) || line!!.contains("fatal", true)) {
+                                log("[xray] $line")
+                            }
                         }
                     }
                     val exitCode = proc.waitFor()
@@ -451,7 +433,7 @@ class BypassVpnService : VpnService() {
             }.apply { isDaemon = true }.start()
 
             var portReady = false
-            for (i in 0 until 12) {
+            for (i in 0 until 15) {
                 if (!proc.isAlive) break
                 if (ServerScanner.tcpPing("127.0.0.1", 1080, 100) >= 0) {
                     portReady = true
@@ -572,9 +554,9 @@ class BypassVpnService : VpnService() {
         if (oldProc != null) {
             try { oldProc.destroy() } catch (_: Exception) {}
             try {
-                if (!oldProc.waitFor(200, TimeUnit.MILLISECONDS)) {
+                if (!oldProc.waitFor(250, TimeUnit.MILLISECONDS)) {
                     oldProc.destroyForcibly()
-                    oldProc.waitFor(200, TimeUnit.MILLISECONDS)
+                    oldProc.waitFor(250, TimeUnit.MILLISECONDS)
                 }
             } catch (_: Exception) {
                 try { oldProc.destroyForcibly() } catch (_: Exception) {}
