@@ -55,7 +55,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_AUTO_CONNECT -> {
-                if (!ensureForeground("Автоподбор раздельных каналов...")) return START_NOT_STICKY
+                if (!ensureForeground("Автоподбор серверов...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Проверка каналов..."
                 notifyState(applicationContext)
@@ -66,7 +66,7 @@ class BypassVpnService : VpnService() {
             }
 
             ACTION_RESCAN_AND_CONNECT -> {
-                if (!ensureForeground("Поиск серверов для каналов...")) return START_NOT_STICKY
+                if (!ensureForeground("Поиск серверов на GitHub...")) return START_NOT_STICKY
                 isAutoSearching = true
                 searchStatusText = "Загрузка баз..."
                 notifyState(applicationContext)
@@ -88,7 +88,6 @@ class BypassVpnService : VpnService() {
         return START_STICKY
     }
 
-    /** Подбираем и проверяем живой второй узел для YouTube, чтобы не грузить основной канал ИИ */
     private fun pickVerifiedMediaNode(primary: VlessNode): VlessNode? {
         val list = ServerScanner.loadWorkingList(applicationContext)
         val candidates = list
@@ -105,7 +104,7 @@ class BypassVpnService : VpnService() {
 
     private fun isTgDirectEnabled(): Boolean =
         applicationContext.getSharedPreferences(ServerScanner.PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean("tg_direct", true)
+            .getBoolean("tg_direct", false)
 
     private fun handleStartWithPrecheck(rawUri: String, skipCheck: Boolean, blockIpv6: Boolean) {
         try {
@@ -128,17 +127,17 @@ class BypassVpnService : VpnService() {
                 searchStatusText = "Проверка ${target.node.name.take(14)}..."
                 updateNotification("Проверка: ${target.node.name.take(24)}")
                 notifyState(applicationContext)
-                log("Проверка канала ИИ: ${target.shortTitle()}...")
+                log("Проверка узла: ${target.shortTitle()}...")
 
                 val livePing = ServerScanner.quickLiveCheckNode(applicationContext, target.node, 10824)
                 if (livePing < 0) {
-                    log("Узел перестал отвечать. Ищу замену в списке...")
+                    log("Узел не прошёл реальный трафик-тест. Ищу живой в списке...")
                     val savedList = ServerScanner.loadWorkingList(applicationContext)
                     var replacement: TestedNode? = null
                     var checked = 0
                     for (cand in savedList) {
                         if (cand.node.rawUri == target.node.rawUri) continue
-                        if (checked >= 5) break
+                        if (checked >= 6) break
                         checked++
                         val cp = ServerScanner.quickLiveCheckNode(applicationContext, cand.node, 10824)
                         if (cp > 0) {
@@ -150,16 +149,16 @@ class BypassVpnService : VpnService() {
                     if (replacement != null) {
                         target = replacement
                         ServerScanner.saveSelectedNode(applicationContext, replacement)
-                        log("Автопереключение канала ИИ: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
+                        log("Переключился на живой узел: ${replacement.shortTitle()} (${replacement.pingMs}мс)")
                     } else {
-                        log("Сохранённые серверы устарели -> запускаю свежий автопоиск...")
+                        log("Живых сохранённых узлов нет -> запускаю свежий автопоиск...")
                         handleAutoConnect(forceRescan = true)
                         return
                     }
                 } else {
                     target = target.copy(pingMs = livePing)
                     ServerScanner.saveSelectedNode(applicationContext, target)
-                    log("Канал ИИ жив (${livePing}мс).")
+                    log("Узел отвечает (${livePing}мс).")
                 }
             }
 
@@ -207,15 +206,15 @@ class BypassVpnService : VpnService() {
                     searchStatusText = "Проверка ${preferred.node.name.take(14)}..."
                     updateNotification("Проверка: ${preferred.node.name.take(24)}")
                     notifyState(applicationContext)
-                    log("Быстрая проверка канала ИИ: ${preferred.shortTitle()}...")
+                    log("Проверка сохранённого узла: ${preferred.shortTitle()}...")
 
                     val livePing = ServerScanner.quickLiveCheckNode(applicationContext, preferred.node, 10825)
                     if (livePing > 0) {
                         chosen = preferred.copy(pingMs = livePing)
                         ServerScanner.saveSelectedNode(applicationContext, chosen)
-                        log("Канал ИИ жив (${livePing}мс): ${chosen.shortTitle()}")
+                        log("Узел жив (${livePing}мс): ${chosen.shortTitle()}")
                     } else {
-                        log("Узел не отвечает -> запускаю свежий автопоиск...")
+                        log("Сохранённый узел не отвечает -> запускаю автопоиск...")
                     }
                 }
             }
@@ -242,7 +241,7 @@ class BypassVpnService : VpnService() {
             searchStatusText = ""
 
             if (chosen == null) {
-                log("Автопоиск не нашёл рабочих серверов.")
+                log("Автопоиск не нашёл рабочих серверов в текущих базах. Попробуйте нажать «Автопоиск» ещё раз или сменить сеть (Wi-Fi / мобильный интернет).")
                 stopTunnelInternal(stopService = true)
                 return
             }
@@ -413,7 +412,7 @@ class BypassVpnService : VpnService() {
                 mediaNode != null -> mediaNode.name.take(16)
                 else -> "Основной VLESS"
             }
-            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через медиа-канал"
+            val tgChannel = if (tgDirect) "Напрямую (Direct)" else "Через VLESS"
             log("Каналы разделены: ИИ/Meta -> $serverName | YouTube -> $ytChannel | Telegram -> $tgChannel")
         } catch (e: Throwable) {
             log("ОШИБКА hev-socks5-tunnel: ${Log.getStackTraceString(e)}")
@@ -624,7 +623,7 @@ class BypassVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
             }
-            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать серверы для каналов." }
+            return sb.toString().trim().ifEmpty { "Нажмите «Автопоиск», чтобы подобрать серверы из баз GitHub." }
         }
 
         @Synchronized
