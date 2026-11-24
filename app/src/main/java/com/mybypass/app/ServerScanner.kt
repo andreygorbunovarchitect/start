@@ -16,8 +16,10 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.Collections
+import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -28,6 +30,7 @@ import javax.net.ssl.SSLSocketFactory
 data class TestedNode(
     val node: VlessNode,
     val pingMs: Long,
+    val speedKbps: Long = 0L,
     val countryCode: String = "",
     val geminiOk: Boolean = false,
     val flowOk: Boolean = false,
@@ -46,17 +49,24 @@ data class TestedNode(
     val allWork: Boolean
         get() = hasGeminiAccess && gptOk && ytOk && metaOk && tgOk && waOk
 
+    fun speedLabel(): String {
+        if (speedKbps <= 0L) return ""
+        val mbps = speedKbps / 1000.0
+        return if (mbps >= 1.0) {
+            String.format(Locale.US, " • %.1f Мбит/с", mbps)
+        } else {
+            " • ${speedKbps} Кбит/с"
+        }
+    }
+
     fun priorityTier(): Int {
-        val fast = pingMs in 1..1800
-        val medium = pingMs in 1..4500
+        val fastEnough = pingMs in 1..2200 && (speedKbps == 0L || speedKbps >= 1500L)
         return when {
-            fast && isTcpReality && allWork -> 0
-            medium && isTcpReality && hasGeminiAccess && gptOk && ytOk && metaOk -> 1
-            medium && hasGeminiAccess && gptOk && ytOk && metaOk -> 2
-            medium && hasGeminiAccess -> 3
-            medium && isTcpReality && (gptOk || ytOk || metaOk || tgOk) -> 4
-            medium && (gptOk || ytOk || metaOk || tgOk || waOk) -> 5
-            else -> 6
+            fastEnough && hasGeminiAccess && gptOk && ytOk && metaOk -> 0
+            hasGeminiAccess && gptOk && ytOk && metaOk -> 1
+            hasGeminiAccess -> 2
+            gptOk || ytOk || metaOk || tgOk -> 3
+            else -> 4
         }
     }
 
@@ -78,13 +88,13 @@ data class TestedNode(
 
     fun shortTitle(): String {
         val cc = if (countryCode.isNotBlank()) "[$countryCode] " else ""
-        return "$cc${node.name.take(24)} ${capabilitiesTag()}"
+        return "$cc${node.name.take(22)} ${capabilitiesTag()}${speedLabel()}"
     }
 
     fun listItemLabel(index: Int, isSelected: Boolean): String {
         val mark = if (isSelected) "▶ " else ""
         val cc = if (countryCode.isNotBlank()) "[$countryCode] " else ""
-        return "$mark#${index + 1} • ${pingMs}мс • $cc${node.name.take(22)}\n" +
+        return "$mark#${index + 1} • ${pingMs}мс${speedLabel()} • $cc${node.name.take(20)}\n" +
             "    ${capabilitiesTag()} • ${node.protocol}/${node.security}/${node.network}"
     }
 }
@@ -181,6 +191,7 @@ object ServerScanner {
             arr.put(JSONObject().apply {
                 put("uri", item.node.rawUri)
                 put("ping", item.pingMs)
+                put("speed", item.speedKbps)
                 put("cc", item.countryCode)
                 put("gemini", item.hasGeminiAccess)
                 put("flow", item.flowOk)
@@ -218,6 +229,7 @@ object ServerScanner {
                     TestedNode(
                         node = node,
                         pingMs = obj.optLong("ping", 999L),
+                        speedKbps = obj.optLong("speed", 0L),
                         countryCode = obj.optString("cc", ""),
                         geminiOk = gemini,
                         flowOk = flow,
@@ -269,7 +281,7 @@ object ServerScanner {
                 .start()
 
             var portReady = false
-            for (i in 0 until 12) {
+            for (i in 0 until 10) {
                 if (!proc.isAlive) return -1L
                 if (tcpPing("127.0.0.1", tempPort, 100) >= 0) {
                     portReady = true
@@ -280,7 +292,7 @@ object ServerScanner {
             if (!portReady) return -1L
 
             val start = System.currentTimeMillis()
-            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 3800, readBody = false)
+            val (resp, _) = socks5hHttpsGet(tempPort, "www.gstatic.com", "/generate_204", 3200, maxBodyBytes = 0)
             if (resp != null && resp.code in 200..399) {
                 (System.currentTimeMillis() - start).coerceAtLeast(1L)
             } else {
@@ -304,9 +316,10 @@ object ServerScanner {
         }
         cancelFlag.set(false)
 
+        val subProbePool = Executors.newCachedThreadPool()
         try {
             if (hasForeignVpnActive(context)) {
-                BypassVpnService.log("ВНИМАНИЕ: на телефоне включён другой VPN! Отключите его перед автопоиском, иначе тесты будут срываться.")
+                BypassVpnService.log("ВНИМАНИЕ: включён другой VPN! Отключите его перед автопоиском.")
             }
 
             val lines = rawInput.lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
@@ -361,7 +374,7 @@ object ServerScanner {
             if (cancelFlag.get()) return emptyList()
 
             var uniqueNodes = allParsed.values.toList()
-            BypassVpnService.log("Всего валидных ключей (VLESS/Trojan/SS): ${uniqueNodes.size}")
+            BypassVpnService.log("Всего валидных ключей: ${uniqueNodes.size}")
 
             if (filterAiCountries) {
                 val before = uniqueNodes.size
@@ -374,17 +387,17 @@ object ServerScanner {
                 return emptyList()
             }
 
-            val candidates = uniqueNodes.shuffled().take(360)
+            val candidates = uniqueNodes.shuffled().take(420)
 
             notifyProgress("TCP-пинг ${candidates.size} узлов...")
             BypassVpnService.log("Этап 1/2: TCP-пинг ${candidates.size} узлов...")
-            val tcpPool = Executors.newFixedThreadPool(30)
+            val tcpPool = Executors.newFixedThreadPool(32)
             val tcpAlive = try {
                 val futures = candidates.map { node ->
                     tcpPool.submit(Callable {
                         if (cancelFlag.get()) return@Callable null
-                        val ping = tcpPing(node.host, node.port, 1600)
-                        if (ping in 0..1800) node to ping else null
+                        val ping = tcpPing(node.host, node.port, 1400)
+                        if (ping in 0..1600) node to ping else null
                     })
                 }
                 futures.mapNotNull {
@@ -395,15 +408,13 @@ object ServerScanner {
             }
 
             if (cancelFlag.get()) return emptyList()
-            BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Пакетный тест через Xray...")
+            BypassVpnService.log("Ответили по TCP: ${tcpAlive.size}. Параллельный тест скорости и сервисов...")
             if (tcpAlive.isEmpty()) return emptyList()
 
-            // Не ставим 10-мс РФ-релеи строго вперёд: перемешиваем все узлы с пингом <= 600 мс,
-            // отдавая лёгкий приоритет reality/tcp, чтобы проверять разные страны и базы
-            val fastBucket = tcpAlive.filter { it.second <= 600L }.shuffled()
+            val fastBucket = tcpAlive.filter { it.second <= 550L }.shuffled()
                 .sortedBy { if (it.first.security == "reality" && it.first.network == "tcp") 0 else 1 }
-            val slowerBucket = tcpAlive.filter { it.second > 600L }.shuffled()
-            val toVerify = (fastBucket + slowerBucket).map { it.first }.take(200)
+            val slowerBucket = tcpAlive.filter { it.second > 550L }.shuffled()
+            val toVerify = (fastBucket + slowerBucket).map { it.first }.take(240)
 
             val verified = Collections.synchronizedList(mutableListOf<TestedNode>())
             val fallbackLive = Collections.synchronizedList(mutableListOf<TestedNode>())
@@ -411,19 +422,20 @@ object ServerScanner {
             val doneCount = AtomicInteger(0)
             val firstDiagErr = AtomicReference<String?>(null)
 
-            val batchSize = 20
+            val batchSize = 16
             var batchPortBase = 10900
             val batches = toVerify.chunked(batchSize)
 
             for (batch in batches) {
                 if (cancelFlag.get()) break
-                if (verified.size >= 20 || (gemCount.get() >= 6 && verified.size >= 10)) break
+                if (verified.size >= 24 || (gemCount.get() >= 10 && verified.size >= 14)) break
 
                 testBatch(
                     context = context,
                     batch = batch,
                     basePort = batchPortBase,
                     totalPlanned = toVerify.size,
+                    subProbePool = subProbePool,
                     verified = verified,
                     fallbackLive = fallbackLive,
                     gemCount = gemCount,
@@ -437,11 +449,13 @@ object ServerScanner {
 
             if (verified.isEmpty()) {
                 if (fallbackLive.isNotEmpty()) {
-                    val sortedFallback = fallbackLive.sortedBy { it.pingMs }.take(8)
+                    val sortedFallback = fallbackLive.sortedWith(
+                        compareBy<TestedNode>({ -it.speedKbps }, { it.pingMs })
+                    ).take(10)
                     saveWorkingList(context, sortedFallback)
                     saveSelectedNode(context, sortedFallback[0])
                     BypassVpnService.log(
-                        "Найдено ${sortedFallback.size} живых узлов (без подтверждённого Gemini). " +
+                        "Найдено ${sortedFallback.size} живых узлов. " +
                             "Лучший: ${sortedFallback[0].shortTitle()} • ${sortedFallback[0].pingMs}мс"
                     )
                     return sortedFallback
@@ -454,7 +468,7 @@ object ServerScanner {
             }
 
             val sorted = verified.sortedWith(
-                compareBy<TestedNode>({ it.priorityTier() }, { it.pingMs })
+                compareBy<TestedNode>({ it.priorityTier() }, { -it.speedKbps }, { it.pingMs })
             )
             saveWorkingList(context, sorted)
             saveSelectedNode(context, sorted[0])
@@ -467,6 +481,7 @@ object ServerScanner {
             return sorted
         } finally {
             scanningFlag.set(false)
+            subProbePool.shutdownNow()
             notifyProgress("")
         }
     }
@@ -476,6 +491,7 @@ object ServerScanner {
         batch: List<VlessNode>,
         basePort: Int,
         totalPlanned: Int,
+        subProbePool: java.util.concurrent.ExecutorService,
         verified: MutableList<TestedNode>,
         fallbackLive: MutableList<TestedNode>,
         gemCount: AtomicInteger,
@@ -504,11 +520,10 @@ object ServerScanner {
                 if (cancelFlag.get()) return
                 if (!proc.isAlive) {
                     val out = try { proc.inputStream.bufferedReader().readText().take(200) } catch (_: Exception) { "" }
-                    // Если 1 битый конфиг сломал пакет, делим пакет пополам и проверяем остальные
                     if (batch.size > 1) {
                         val mid = batch.size / 2
-                        testBatch(context, batch.subList(0, mid), basePort, totalPlanned, verified, fallbackLive, gemCount, doneCount, firstDiagErr)
-                        testBatch(context, batch.subList(mid, batch.size), basePort + mid, totalPlanned, verified, fallbackLive, gemCount, doneCount, firstDiagErr)
+                        testBatch(context, batch.subList(0, mid), basePort, totalPlanned, subProbePool, verified, fallbackLive, gemCount, doneCount, firstDiagErr)
+                        testBatch(context, batch.subList(mid, batch.size), basePort + mid, totalPlanned, subProbePool, verified, fallbackLive, gemCount, doneCount, firstDiagErr)
                     } else {
                         firstDiagErr.compareAndSet(null, "xray error: $out")
                         doneCount.incrementAndGet()
@@ -527,13 +542,14 @@ object ServerScanner {
                 return
             }
 
-            val workerPool = Executors.newFixedThreadPool(minOf(batch.size, 10))
+            // 6 одновременных узлов, каждый параллельно тестирует свои сервисы за ~2 сек
+            val workerPool = Executors.newFixedThreadPool(minOf(batch.size, 6))
             try {
                 val tasks = batch.mapIndexed { idx, node ->
                     workerPool.submit {
                         if (cancelFlag.get()) return@submit
                         val port = basePort + idx
-                        val res = probeNodeOnPort(node, port)
+                        val res = probeNodeParallel(node, port, subProbePool)
                         val done = doneCount.incrementAndGet()
 
                         if (res.verified != null) {
@@ -541,17 +557,17 @@ object ServerScanner {
                             if (res.verified.hasGeminiAccess) gemCount.incrementAndGet()
                             val cc = if (res.verified.countryCode.isNotBlank()) "[${res.verified.countryCode}] " else ""
                             BypassVpnService.log(
-                                "✓ [${verified.size}] ${res.verified.pingMs}мс | $cc${node.name.take(20)} ${res.verified.capabilitiesTag()}"
+                                "✓ [${verified.size}] ${res.verified.pingMs}мс${res.verified.speedLabel()} | $cc${node.name.take(18)} ${res.verified.capabilitiesTag()}"
                             )
                             notifyProgress("Найдено: ${verified.size} (Gem: ${gemCount.get()})")
                         } else {
-                            if (res.fallback != null && fallbackLive.size < 10) {
+                            if (res.fallback != null && fallbackLive.size < 12) {
                                 fallbackLive.add(res.fallback)
                             }
                             if (!res.error.isNullOrBlank()) {
                                 firstDiagErr.compareAndSet(null, res.error)
                             }
-                            if (done % 10 == 0 || done == totalPlanned) {
+                            if (done % 8 == 0 || done == totalPlanned) {
                                 notifyProgress("Тест $done/$totalPlanned (Gem: ${gemCount.get()})")
                             }
                         }
@@ -577,33 +593,42 @@ object ServerScanner {
         val error: String?
     )
 
-    private fun probeNodeOnPort(node: VlessNode, socksPort: Int): ProbeResult {
+    private fun probeNodeParallel(
+        node: VlessNode,
+        socksPort: Int,
+        pool: java.util.concurrent.ExecutorService
+    ): ProbeResult {
         val pingStart = System.currentTimeMillis()
-        val (baseResp, getErr) = socks5hHttpsGet(socksPort, "www.gstatic.com", "/generate_204", 3800, readBody = false)
+        val (baseResp, getErr) = socks5hHttpsGet(socksPort, "www.gstatic.com", "/generate_204", 3200, maxBodyBytes = 0)
         if (baseResp == null || baseResp.code !in 200..399) {
             return ProbeResult(null, null, "base test (${node.host}): ${getErr ?: "HTTP ${baseResp?.code}"}")
         }
         val pingMs = (System.currentTimeMillis() - pingStart).coerceAtLeast(1L)
-        if (pingMs > 4800L || cancelFlag.get()) return ProbeResult(null, null, "slow (${pingMs}ms)")
+        if (pingMs > 4200L || cancelFlag.get()) return ProbeResult(null, null, "slow (${pingMs}ms)")
 
-        var countryCode = ""
-        val (traceResp, _) = socks5hHttpsGet(socksPort, "chatgpt.com", "/cdn-cgi/trace", 1800, readBody = true)
-        if (traceResp != null && traceResp.code == 200) {
-            val match = Regex("loc=([A-Za-z]{2})").find(traceResp.body)
-            if (match != null) countryCode = match.groupValues[1].uppercase()
-        }
-        val badGeo = countryCode.isNotBlank() && countryCode in BAD_GEO_CODES
+        // Запускаем все проверки сервисов и замер скорости ПАРАЛЛЕЛЬНО
+        val speedFut: Future<Long> = pool.submit(Callable {
+            val t0 = System.currentTimeMillis()
+            val (spResp, _) = socks5hHttpsGet(socksPort, "speed.cloudflare.com", "/__down?bytes=65536", 2600, maxBodyBytes = 65536)
+            val dt = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
+            if (spResp != null && spResp.code == 200 && spResp.bytesRead > 4096) {
+                (spResp.bytesRead * 8L) / dt
+            } else {
+                0L
+            }
+        })
 
-        val baseFallback = if (!badGeo) {
-            TestedNode(node = node, pingMs = pingMs, countryCode = countryCode)
-        } else {
-            null
-        }
+        val traceFut: Future<String> = pool.submit(Callable {
+            val (tr, _) = socks5hHttpsGet(socksPort, "chatgpt.com", "/cdn-cgi/trace", 2200, maxBodyBytes = 2048)
+            if (tr != null && tr.code == 200) {
+                Regex("loc=([A-Za-z]{2})").find(tr.body)?.groupValues?.get(1)?.uppercase().orEmpty()
+            } else {
+                ""
+            }
+        })
 
-        val gptOk = if (badGeo) {
-            false
-        } else {
-            val (gptResp, _) = socks5hHttpsGet(socksPort, "api.openai.com", "/v1/models", 1800, readBody = true)
+        val gptFut: Future<Boolean> = pool.submit(Callable {
+            val (gptResp, _) = socks5hHttpsGet(socksPort, "api.openai.com", "/v1/models", 2200, maxBodyBytes = 2048)
             if (gptResp == null) {
                 false
             } else {
@@ -612,12 +637,10 @@ object ServerScanner {
                     !lower.contains("unsupported_country") &&
                     !lower.contains("cf-mitigated")
             }
-        }
+        })
 
-        val flowOk = if (badGeo) {
-            false
-        } else {
-            val (flowResp, _) = socks5hHttpsGet(socksPort, "labs.google", "/fx/tools/flow", 2000, readBody = true)
+        val flowFut: Future<Boolean> = pool.submit(Callable {
+            val (flowResp, _) = socks5hHttpsGet(socksPort, "labs.google", "/fx/tools/flow", 2400, maxBodyBytes = 4096)
             if (flowResp == null) {
                 false
             } else {
@@ -635,12 +658,10 @@ object ServerScanner {
                     else -> false
                 }
             }
-        }
+        })
 
-        val rawGeminiOk = if (badGeo) {
-            false
-        } else {
-            val (gemResp, _) = socks5hHttpsGet(socksPort, "gemini.google.com", "/app", 2200, readBody = true)
+        val geminiFut: Future<Boolean> = pool.submit(Callable {
+            val (gemResp, _) = socks5hHttpsGet(socksPort, "gemini.google.com", "/app", 2500, maxBodyBytes = 4096)
             if (gemResp == null) {
                 false
             } else {
@@ -660,26 +681,45 @@ object ServerScanner {
                     else -> false
                 }
             }
-        }
+        })
+
+        val ytFut: Future<Boolean> = pool.submit(Callable {
+            val (ytResp, _) = socks5hHttpsGet(socksPort, "www.youtube.com", "/generate_204", 2200, maxBodyBytes = 0)
+            ytResp != null && (
+                ytResp.code == 204 ||
+                    (ytResp.code in 200..399 && !ytResp.location.lowercase().contains("/sorry"))
+                )
+        })
+
+        val metaFut: Future<Boolean> = pool.submit(Callable {
+            val (metaResp, _) = socks5hHttpsGet(socksPort, "www.instagram.com", "/", 2200, maxBodyBytes = 0)
+            metaResp != null && metaResp.code in 200..399
+        })
+
+        val tgFut: Future<Boolean> = pool.submit(Callable {
+            val (tgResp, _) = socks5hHttpsGet(socksPort, "api.telegram.org", "/", 2000, maxBodyBytes = 0)
+            tgResp != null && tgResp.code in 200..404
+        })
+
+        val speedKbps = try { speedFut.get(3000, TimeUnit.MILLISECONDS) } catch (_: Exception) { 0L }
+        val countryCode = try { traceFut.get(2500, TimeUnit.MILLISECONDS) } catch (_: Exception) { "" }
+        val badGeo = countryCode.isNotBlank() && countryCode in BAD_GEO_CODES
+
+        val gptOk = if (badGeo) false else try { gptFut.get(2500, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
+        val flowOk = if (badGeo) false else try { flowFut.get(2700, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
+        val rawGeminiOk = if (badGeo) false else try { geminiFut.get(2800, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
+        val ytOk = try { ytFut.get(2500, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
+        val metaOk = try { metaFut.get(2500, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
+        val tgOk = try { tgFut.get(2300, TimeUnit.MILLISECONDS) } catch (_: Exception) { false }
 
         val effectiveGeminiOk = !badGeo && (rawGeminiOk || flowOk)
+        val baseFallback = if (!badGeo) {
+            TestedNode(node = node, pingMs = pingMs, speedKbps = speedKbps, countryCode = countryCode)
+        } else {
+            null
+        }
 
-        val (ytResp, _) = socks5hHttpsGet(socksPort, "www.youtube.com", "/generate_204", 1800, readBody = false)
-        val ytOk = ytResp != null && (
-            ytResp.code == 204 ||
-                (ytResp.code in 200..399 && !ytResp.location.lowercase().contains("/sorry"))
-            )
-
-        val (metaResp, _) = socks5hHttpsGet(socksPort, "www.instagram.com", "/", 1800, readBody = false)
-        val metaOk = metaResp != null && metaResp.code in 200..399
-
-        val (tgResp, _) = socks5hHttpsGet(socksPort, "api.telegram.org", "/", 1600, readBody = false)
-        val tgOk = tgResp != null && tgResp.code in 200..404
-
-        val (waResp, _) = socks5hHttpsGet(socksPort, "web.whatsapp.com", "/", 1600, readBody = false)
-        val waOk = waResp != null && waResp.code in 200..399
-
-        if (!effectiveGeminiOk && !flowOk && !gptOk && !ytOk && !metaOk && !tgOk && !waOk) {
+        if (!effectiveGeminiOk && !flowOk && !gptOk && !ytOk && !metaOk && !tgOk) {
             return ProbeResult(null, baseFallback, "no services open on ${node.host}")
         }
 
@@ -687,6 +727,7 @@ object ServerScanner {
             verified = TestedNode(
                 node = node,
                 pingMs = pingMs,
+                speedKbps = speedKbps,
                 countryCode = countryCode,
                 geminiOk = effectiveGeminiOk,
                 flowOk = flowOk,
@@ -694,7 +735,7 @@ object ServerScanner {
                 ytOk = ytOk,
                 metaOk = metaOk,
                 tgOk = tgOk,
-                waOk = waOk
+                waOk = metaOk
             ),
             fallback = baseFallback,
             error = null
@@ -717,7 +758,8 @@ object ServerScanner {
     private data class SimpleHttpResponse(
         val code: Int,
         val location: String,
-        val body: String
+        val body: String,
+        val bytesRead: Int
     )
 
     private fun socks5hHttpsGet(
@@ -725,7 +767,7 @@ object ServerScanner {
         host: String,
         path: String,
         timeoutMs: Int,
-        readBody: Boolean
+        maxBodyBytes: Int
     ): Pair<SimpleHttpResponse?, String?> {
         val domainBytes = host.toByteArray(Charsets.UTF_8)
         if (domainBytes.size > 255) return Pair(null, "host too long")
@@ -826,23 +868,28 @@ object ServerScanner {
             }
 
             var body = ""
-            if (readBody && statusCode != 204 && statusCode !in 300..399) {
-                val maxRead = if (contentLength in 0..6144) contentLength else 6144
-                val bodyBuf = ByteArrayOutputStream()
-                val chunk = ByteArray(1024)
+            var totalBytes = 0
+            if (maxBodyBytes > 0 && statusCode != 204 && statusCode !in 300..399) {
+                val limit = if (contentLength in 0..maxBodyBytes) contentLength else maxBodyBytes
+                val saveText = maxBodyBytes <= 8192
+                val bodyBuf = if (saveText) ByteArrayOutputStream() else null
+                val chunk = ByteArray(4096)
                 try {
-                    while (bodyBuf.size() < maxRead) {
-                        val toRead = minOf(chunk.size, maxRead - bodyBuf.size())
+                    while (totalBytes < limit) {
+                        val toRead = minOf(chunk.size, limit - totalBytes)
                         val n = sslIn.read(chunk, 0, toRead)
                         if (n <= 0) break
-                        bodyBuf.write(chunk, 0, n)
+                        totalBytes += n
+                        bodyBuf?.write(chunk, 0, n)
                     }
                 } catch (_: SocketTimeoutException) {
                 }
-                body = bodyBuf.toString("UTF-8")
+                if (bodyBuf != null) {
+                    body = bodyBuf.toString("UTF-8")
+                }
             }
 
-            Pair(SimpleHttpResponse(statusCode, location, body), null)
+            Pair(SimpleHttpResponse(statusCode, location, body, totalBytes), null)
         } catch (e: Exception) {
             Pair(null, "${e.javaClass.simpleName}: ${e.message}")
         } finally {
@@ -880,7 +927,7 @@ object ServerScanner {
             connectTimeout = 10000
             readTimeout = 12000
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "MyBypassXray/4.4")
+            setRequestProperty("User-Agent", "MyBypassXray/4.5")
         }
         return try {
             val code = conn.responseCode
