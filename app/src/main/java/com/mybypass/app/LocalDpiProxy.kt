@@ -170,7 +170,8 @@ object LocalDpiProxy {
             prev = b
         }
 
-        val firstLine = sb.toString().lineSequence().firstOrNull().orEmpty()
+        val requestText = sb.toString()
+        val firstLine = requestText.lineSequence().firstOrNull().orEmpty()
         val parts = firstLine.split(' ')
         if (parts.size < 2 || !parts[0].equals("CONNECT", true)) return
 
@@ -194,7 +195,6 @@ object LocalDpiProxy {
     }
 
     private fun connectDirect(host: String, port: Int): Socket? {
-        // Защита от случайного попадания FakeDNS-диапазона 198.18.0.0/15
         if (host.startsWith("198.18.") || host.startsWith("198.19.")) return null
         return try {
             val addr = InetAddress.getByName(host)
@@ -267,21 +267,19 @@ object LocalDpiProxy {
         }
 
         when (profile) {
-            // Профиль 1: Разбиение TLS-записи + разрыв посередине SNI-домена
             0 -> {
                 val sniPos = findSniOffset(data, len)
                 if (sniPos > 5 && sniPos + 3 < len) {
-                    // Разрываем TLS Record Header (первые 2 байта отдельно) и затем рвём имя хоста SNI
-                    out.write(data, 0, 2)
+                    out.write(data, 0, 3)
                     out.flush()
                     Thread.sleep(3)
-                    out.write(data, 2, sniPos - 2)
+                    out.write(data, 3, sniPos - 3)
                     out.flush()
                     Thread.sleep(3)
                     out.write(data, sniPos, len - sniPos)
                     out.flush()
                 } else {
-                    val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
+                    val splitAt = minOf(3, len / 2).coerceAtLeast(1)
                     out.write(data, 0, splitAt)
                     out.flush()
                     Thread.sleep(4)
@@ -289,16 +287,14 @@ object LocalDpiProxy {
                     out.flush()
                 }
             }
-            // Профиль 2: Split + Disorder
             1 -> {
-                val splitAt = minOf(5, len / 2)
+                val splitAt = minOf(3, len / 2).coerceAtLeast(1)
                 out.write(data, splitAt, len - splitAt)
                 out.flush()
                 Thread.sleep(4)
                 out.write(data, 0, splitAt)
                 out.flush()
             }
-            // Профиль 3: Фрагментация по 2 байта
             else -> {
                 var offset = 0
                 while (offset < len) {
@@ -313,7 +309,6 @@ object LocalDpiProxy {
     }
 
     private fun findSniOffset(data: ByteArray, len: Int): Int {
-        // Ищем TLS ClientHello (0x16 0x03) и расширение SNI (0x00 0x00)
         if (len < 45 || (data[0].toInt() and 0xFF) != 0x16 || (data[1].toInt() and 0xFF) != 0x03) {
             return -1
         }
