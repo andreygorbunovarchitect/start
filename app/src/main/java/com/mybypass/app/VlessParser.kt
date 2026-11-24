@@ -54,7 +54,6 @@ object VlessParser {
         "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran|aeza|vdsina|firstbyte|timeweb|selectel|reg\\.ru)([^a-z]|$)"
     )
 
-    // Базы, адаптированные под обход ТСПУ в РФ (высокая проходимость)
     val RU_COMPATIBLE_URLS = listOf(
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
@@ -66,7 +65,6 @@ object VlessParser {
         "https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt"
     )
 
-    // Отобранные зарубежные списки без многотысячного мусора
     val FOREIGN_FREE_URLS = listOf(
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
         "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/mix",
@@ -116,6 +114,25 @@ object VlessParser {
         "149.154.160.0/20",
         "185.76.151.0/24",
         "95.161.64.0/20"
+    )
+
+    val GOOGLE_IP_CIDRS = listOf(
+        "8.8.4.4/32",
+        "8.8.8.8/32",
+        "64.233.160.0/19",
+        "66.102.0.0/20",
+        "66.249.80.0/20",
+        "72.14.192.0/18",
+        "74.125.0.0/16",
+        "108.177.0.0/17",
+        "142.250.0.0/15",
+        "172.217.0.0/16",
+        "172.253.0.0/16",
+        "173.194.0.0/16",
+        "192.178.0.0/15",
+        "209.85.128.0/17",
+        "216.58.192.0/19",
+        "216.239.32.0/19"
     )
 
     val AI_AND_SOCIAL_DOMAINS = listOf(
@@ -559,6 +576,47 @@ object VlessParser {
         return if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
     }
 
+    fun buildWarpTestConfig(relayNode: VlessNode, warp: WarpAccount, socksPort: Int): String {
+        val root = JSONObject()
+        root.put("log", JSONObject().apply { put("loglevel", "error") })
+        root.put("dns", JSONObject().apply {
+            put("servers", JSONArray().put("77.88.8.8").put("1.1.1.1"))
+            put("queryStrategy", "UseIPv4")
+        })
+        root.put("inbounds", JSONArray().put(JSONObject().apply {
+            put("tag", "socks-in")
+            put("listen", "127.0.0.1")
+            put("port", socksPort)
+            put("protocol", "socks")
+            put("settings", JSONObject().apply {
+                put("auth", "noauth")
+                put("udp", false)
+                put("ip", "127.0.0.1")
+            })
+        }))
+        root.put("outbounds", JSONArray().apply {
+            put(buildWarpOutbound(warp, "warp-out", "relay"))
+            put(buildProxyOutbound(relayNode, "relay", enableMux = false))
+            put(buildDirectOutbound())
+        })
+        root.put("routing", JSONObject().apply {
+            put("domainStrategy", "AsIs")
+            put("rules", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("type", "field")
+                    put("ip", JSONArray().put("77.88.8.8/32").put("1.1.1.1/32"))
+                    put("outboundTag", "direct")
+                })
+                put(JSONObject().apply {
+                    put("type", "field")
+                    put("inboundTag", JSONArray().put("socks-in"))
+                    put("outboundTag", "warp-out")
+                })
+            })
+        })
+        return root.toString()
+    }
+
     fun buildBatchTestConfig(nodes: List<VlessNode>, basePort: Int): String {
         val root = JSONObject()
         root.put("log", JSONObject().apply { put("loglevel", "error") })
@@ -613,6 +671,7 @@ object VlessParser {
         node: VlessNode,
         mediaNode: VlessNode? = null,
         tgNode: VlessNode? = null,
+        warpAccount: WarpAccount? = null,
         socksPort: Int = 1080,
         smartBypass: Boolean = true,
         splitRu: Boolean = true,
@@ -743,6 +802,11 @@ object VlessParser {
         root.put("inbounds", JSONArray().put(inbound))
 
         val outbounds = JSONArray()
+        val hasWarp = !isTestMode && warpAccount != null
+        if (hasWarp) {
+            outbounds.put(buildWarpOutbound(warpAccount!!, "warp-out", "proxy"))
+        }
+
         outbounds.put(buildProxyOutbound(node, "proxy", enableMux = !isTestMode))
 
         val hasSeparateMedia = !isTestMode && mediaNode != null && mediaNode.rawUri != node.rawUri
@@ -803,11 +867,13 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
+            val aiTag = if (hasWarp) "warp-out" else "proxy"
+
             rules.put(JSONObject().apply {
                 put("type", "field")
-                put("ip", JSONArray().put("1.1.1.1/32").put("8.8.8.8/32"))
+                put("ip", JSONArray().put("1.1.1.1/32"))
                 put("port", "443")
-                put("outboundTag", "proxy")
+                put("outboundTag", aiTag)
             })
 
             if (blockQuic) {
@@ -861,14 +927,20 @@ object VlessParser {
 
             rules.put(JSONObject().apply {
                 put("type", "field")
+                put("ip", JSONArray(GOOGLE_IP_CIDRS))
+                put("outboundTag", aiTag)
+            })
+
+            rules.put(JSONObject().apply {
+                put("type", "field")
                 put("domain", JSONArray(AI_AND_SOCIAL_DOMAINS))
-                put("outboundTag", "proxy")
+                put("outboundTag", aiTag)
             })
 
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("198.18.0.0/15"))
-                put("outboundTag", "proxy")
+                put("outboundTag", aiTag)
             })
 
             if (smartBypass) {
@@ -907,7 +979,7 @@ object VlessParser {
                 rules.put(JSONObject().apply {
                     put("type", "field")
                     put("network", "tcp,udp")
-                    put("outboundTag", "proxy")
+                    put("outboundTag", aiTag)
                 })
             }
         } else {
@@ -929,6 +1001,32 @@ object VlessParser {
         })
 
         return root.toString(2)
+    }
+
+    private fun buildWarpOutbound(warp: WarpAccount, tagName: String, dialerTag: String): JSONObject {
+        val reservedArr = JSONArray()
+        warp.reserved.forEach { reservedArr.put(it) }
+
+        return JSONObject().apply {
+            put("tag", tagName)
+            put("protocol", "wireguard")
+            put("settings", JSONObject().apply {
+                put("secretKey", warp.privateKey)
+                put("address", JSONArray().put(warp.ipv4))
+                put("peers", JSONArray().put(JSONObject().apply {
+                    put("publicKey", warp.peerPublicKey)
+                    put("endpoint", warp.endpoint)
+                    put("keepAlive", 25)
+                }))
+                put("mtu", 1280)
+                put("reserved", reservedArr)
+            })
+            put("streamSettings", JSONObject().apply {
+                put("sockopt", JSONObject().apply {
+                    put("dialerProxy", dialerTag)
+                })
+            })
+        }
     }
 
     private fun buildDirectOutbound(): JSONObject {
