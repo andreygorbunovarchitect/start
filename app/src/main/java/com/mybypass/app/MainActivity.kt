@@ -1,12 +1,10 @@
 package com.mybypass.app
 
-import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -29,7 +27,6 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
@@ -81,10 +78,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val notifPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         BypassVpnService.initLogger(this)
@@ -104,7 +97,7 @@ class MainActivity : AppCompatActivity() {
         outerScroll.addView(root)
 
         val title = TextView(this).apply {
-            text = "MyBypass Xray v4.3 (VLESS + DPI)"
+            text = "VPN дяди Андрея"
             textSize = 22f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
@@ -294,7 +287,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(splitRuCheck)
 
         blockQuicCheck = CheckBox(this).apply {
-            text = "Блокировать QUIC — стабильные Google, YouTube и Meta"
+            text = "Блокировать QUIC — стабильные Google и YouTube"
             isChecked = ServerScanner.isBlockQuicEnabled(this@MainActivity)
             setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 13f
@@ -330,7 +323,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(12), dp(4), dp(12), dp(4))
             setOnClickListener {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("MyBypassXray Log", BypassVpnService.getDiagnosticsReport(this@MainActivity)))
+                cm.setPrimaryClip(ClipData.newPlainText("VPN дяди Андрея Log", BypassVpnService.getDiagnosticsReport(this@MainActivity)))
                 Toast.makeText(this@MainActivity, "Лог скопирован", Toast.LENGTH_SHORT).show()
             }
         }
@@ -358,13 +351,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(outerScroll)
         refreshSelectedLabel()
         updateUi()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
 
         handleTileAutoAction(intent)
     }
