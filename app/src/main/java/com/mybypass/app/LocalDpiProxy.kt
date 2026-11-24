@@ -15,7 +15,7 @@ object LocalDpiProxy {
         "DPI 1: Split на границе SNI (рекомендуется)",
         "DPI 2: Split + Disorder (обратный порядок)",
         "DPI 3: Фрагментация по 2 байта",
-        "DPI 4: Выключен (пустить YT/Discord через VLESS)"
+        "DPI 4: Через VLESS-прокси (если DPI режет фрагментацию)"
     )
 
     private val running = AtomicBoolean(false)
@@ -270,28 +270,28 @@ object LocalDpiProxy {
             0 -> {
                 val sniPos = findSniOffset(data, len)
                 if (sniPos > 5 && sniPos + 3 < len) {
-                    out.write(data, 0, 3)
+                    out.write(data, 0, 2)
                     out.flush()
-                    Thread.sleep(3)
-                    out.write(data, 3, sniPos - 3)
+                    Thread.sleep(6)
+                    out.write(data, 2, sniPos - 2)
                     out.flush()
-                    Thread.sleep(3)
+                    Thread.sleep(6)
                     out.write(data, sniPos, len - sniPos)
                     out.flush()
                 } else {
-                    val splitAt = minOf(3, len / 2).coerceAtLeast(1)
+                    val splitAt = minOf(len / 3, 24).coerceAtLeast(2)
                     out.write(data, 0, splitAt)
                     out.flush()
-                    Thread.sleep(4)
+                    Thread.sleep(8)
                     out.write(data, splitAt, len - splitAt)
                     out.flush()
                 }
             }
             1 -> {
-                val splitAt = minOf(3, len / 2).coerceAtLeast(1)
+                val splitAt = minOf(5, len / 2)
                 out.write(data, splitAt, len - splitAt)
                 out.flush()
-                Thread.sleep(4)
+                Thread.sleep(8)
                 out.write(data, 0, splitAt)
                 out.flush()
             }
@@ -302,7 +302,7 @@ object LocalDpiProxy {
                     out.write(data, offset, step)
                     out.flush()
                     offset += step
-                    if (offset < len && offset < 80) Thread.sleep(2)
+                    if (offset < len && offset < 80) Thread.sleep(3)
                 }
             }
         }
