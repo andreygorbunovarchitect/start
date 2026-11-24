@@ -27,10 +27,7 @@ jobs:
           set -e
           mkdir -p app/src/main/jniLibs/arm64-v8a /tmp/xray /tmp/hev
 
-          XRAY_URL=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
-            | grep "browser_download_url.*Xray-android-arm64-v8a.zip\"" \
-            | cut -d '"' -f 4)
-          curl -sL "$XRAY_URL" -o /tmp/xray/xray.zip
+          curl -fSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip" -o /tmp/xray/xray.zip
           unzip -o /tmp/xray/xray.zip -d /tmp/xray
           cp /tmp/xray/xray app/src/main/jniLibs/arm64-v8a/libxray.so
 
