@@ -27,7 +27,10 @@ data class VlessNode(
     val mode: String,
     val alpn: String,
     val allowInsecure: Boolean,
-    val isCurated: Boolean = false
+    val isCurated: Boolean = false,
+    val protocol: String = "vless",
+    val password: String = "",
+    val method: String = ""
 )
 
 object VlessParser {
@@ -232,18 +235,17 @@ object VlessParser {
         var text = rawText.trim()
         if (text.isEmpty()) return emptyList()
 
-        if (!text.contains("vless://", ignoreCase = true)) {
+        val hasProxyScheme = text.contains("vless://", ignoreCase = true) ||
+            text.contains("trojan://", ignoreCase = true) ||
+            text.contains("ss://", ignoreCase = true)
+
+        if (!hasProxyScheme) {
             val cleaned = text.replace("\\s".toRegex(), "")
-            val decoded = try {
-                String(Base64.decode(cleaned, Base64.DEFAULT), Charsets.UTF_8)
-            } catch (_: Exception) {
-                try {
-                    String(Base64.decode(cleaned, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
-                } catch (_: Exception) {
-                    ""
-                }
-            }
-            if (decoded.contains("vless://", ignoreCase = true)) {
+            val decoded = decodeBase64Flexible(cleaned)
+            if (decoded.contains("vless://", ignoreCase = true) ||
+                decoded.contains("trojan://", ignoreCase = true) ||
+                decoded.contains("ss://", ignoreCase = true)
+            ) {
                 text = decoded
             }
         }
@@ -252,9 +254,8 @@ object VlessParser {
         val result = ArrayList<VlessNode>()
         for (line in text.lines()) {
             val trimmed = line.trim()
-            if (!trimmed.startsWith("vless://", ignoreCase = true)) continue
             val node = parseVlessUri(trimmed, isCuratedSource) ?: continue
-            val key = "${node.host}:${node.port}:${node.uuid}:${node.network}:${node.security}"
+            val key = "${node.protocol}:${node.host}:${node.port}:${node.uuid}:${node.password}:${node.network}:${node.security}"
             if (seen.add(key)) {
                 result.add(node)
             }
@@ -264,9 +265,16 @@ object VlessParser {
 
     fun parseVlessUri(uri: String, isCuratedSource: Boolean = false): VlessNode? {
         val trimmed = uri.trim()
-        if (!trimmed.startsWith("vless://", ignoreCase = true)) return null
-        val body = trimmed.substring(8)
+        return when {
+            trimmed.startsWith("vless://", ignoreCase = true) -> parseVlessInternal(trimmed, isCuratedSource)
+            trimmed.startsWith("trojan://", ignoreCase = true) -> parseTrojanInternal(trimmed, isCuratedSource)
+            trimmed.startsWith("ss://", ignoreCase = true) -> parseShadowsocksInternal(trimmed, isCuratedSource)
+            else -> null
+        }
+    }
 
+    private fun parseVlessInternal(trimmed: String, isCuratedSource: Boolean): VlessNode? {
+        val body = trimmed.substring(8)
         val hashIdx = body.indexOf('#')
         val beforeHash = if (hashIdx >= 0) body.substring(0, hashIdx) else body
         val rawName = if (hashIdx >= 0) body.substring(hashIdx + 1) else ""
@@ -278,39 +286,10 @@ object VlessParser {
         val atIdx = authority.indexOf('@')
         if (atIdx <= 0) return null
         val uuid = safeDecode(authority.substring(0, atIdx), plusAsSpace = false).trim()
-        val hostPort = authority.substring(atIdx + 1).trim()
-        if (uuid.isEmpty() || hostPort.isEmpty()) return null
+        val (host, port) = splitHostPort(authority.substring(atIdx + 1).trim()) ?: return null
+        if (uuid.isEmpty()) return null
 
-        val host: String
-        val port: Int
-        if (hostPort.startsWith("[")) {
-            val closeBracket = hostPort.indexOf(']')
-            if (closeBracket <= 1 || closeBracket + 2 > hostPort.length || hostPort[closeBracket + 1] != ':') {
-                return null
-            }
-            host = hostPort.substring(1, closeBracket)
-            port = hostPort.substring(closeBracket + 2).toIntOrNull() ?: return null
-        } else {
-            val colonIdx = hostPort.lastIndexOf(':')
-            if (colonIdx <= 0) return null
-            host = hostPort.substring(0, colonIdx)
-            port = hostPort.substring(colonIdx + 1).toIntOrNull() ?: return null
-        }
-
-        if (host.isBlank() || port !in 1..65535) return null
-
-        val params = HashMap<String, String>()
-        if (queryStr.isNotEmpty()) {
-            for (pair in queryStr.split('&')) {
-                val eq = pair.indexOf('=')
-                if (eq > 0) {
-                    val k = safeDecode(pair.substring(0, eq), plusAsSpace = false).lowercase()
-                    val v = safeDecode(pair.substring(eq + 1), plusAsSpace = false)
-                    params[k] = v
-                }
-            }
-        }
-
+        val params = parseQueryParams(queryStr)
         val network = (params["type"] ?: "tcp").lowercase().let { if (it == "raw") "tcp" else it }
         if (network !in SUPPORTED_NETWORKS) return null
 
@@ -345,8 +324,166 @@ object VlessParser {
             mode = params["mode"].orEmpty(),
             alpn = params["alpn"].orEmpty(),
             allowInsecure = allowInsecure,
-            isCurated = isCuratedSource
+            isCurated = isCuratedSource,
+            protocol = "vless"
         )
+    }
+
+    private fun parseTrojanInternal(trimmed: String, isCuratedSource: Boolean): VlessNode? {
+        val body = trimmed.substring(9)
+        val hashIdx = body.indexOf('#')
+        val beforeHash = if (hashIdx >= 0) body.substring(0, hashIdx) else body
+        val rawName = if (hashIdx >= 0) body.substring(hashIdx + 1) else ""
+
+        val qIdx = beforeHash.indexOf('?')
+        val authority = if (qIdx >= 0) beforeHash.substring(0, qIdx) else beforeHash
+        val queryStr = if (qIdx >= 0) beforeHash.substring(qIdx + 1) else ""
+
+        val atIdx = authority.indexOf('@')
+        if (atIdx <= 0) return null
+        val password = safeDecode(authority.substring(0, atIdx), plusAsSpace = false).trim()
+        val (host, port) = splitHostPort(authority.substring(atIdx + 1).trim()) ?: return null
+        if (password.isEmpty()) return null
+
+        val params = parseQueryParams(queryStr)
+        val network = (params["type"] ?: "tcp").lowercase().let { if (it == "raw") "tcp" else it }
+        if (network !in SUPPORTED_NETWORKS) return null
+
+        val security = (params["security"] ?: "tls").lowercase()
+        val name = safeDecode(rawName, plusAsSpace = true).trim().ifEmpty { "[TJ] $host:$port" }
+        val allowInsecure = params["allowinsecure"] == "1" ||
+            params["allowinsecure"].equals("true", true) ||
+            params["insecure"] == "1"
+
+        return VlessNode(
+            rawUri = trimmed,
+            name = name,
+            uuid = "",
+            host = host,
+            port = port,
+            encryption = "",
+            flow = "",
+            security = security,
+            network = network,
+            sni = params["sni"] ?: params["peer"] ?: "",
+            fingerprint = params["fp"].orEmpty().ifBlank { "chrome" },
+            publicKey = params["pbk"].orEmpty(),
+            shortId = params["sid"].orEmpty(),
+            spiderX = params["spx"].orEmpty(),
+            path = params["path"].orEmpty().ifBlank { "/" },
+            headerHost = params["host"].orEmpty(),
+            headerType = params["headertype"].orEmpty().lowercase(),
+            serviceName = params["servicename"].orEmpty(),
+            mode = params["mode"].orEmpty(),
+            alpn = params["alpn"].orEmpty(),
+            allowInsecure = allowInsecure,
+            isCurated = isCuratedSource,
+            protocol = "trojan",
+            password = password
+        )
+    }
+
+    private fun parseShadowsocksInternal(trimmed: String, isCuratedSource: Boolean): VlessNode? {
+        val body = trimmed.substring(5)
+        val hashIdx = body.indexOf('#')
+        val beforeHash = if (hashIdx >= 0) body.substring(0, hashIdx) else body
+        val rawName = if (hashIdx >= 0) body.substring(hashIdx + 1) else ""
+        val noQuery = beforeHash.substringBefore('?')
+
+        val atIdx = noQuery.lastIndexOf('@')
+        if (atIdx <= 0) return null
+
+        val userPartRaw = noQuery.substring(0, atIdx)
+        val (host, port) = splitHostPort(noQuery.substring(atIdx + 1).trim()) ?: return null
+
+        val decodedUser = if (userPartRaw.contains(':')) {
+            safeDecode(userPartRaw, plusAsSpace = false)
+        } else {
+            decodeBase64Flexible(userPartRaw.replace("-", "+").replace("_", "/"))
+        }
+
+        val colon = decodedUser.indexOf(':')
+        if (colon <= 0) return null
+        val method = decodedUser.substring(0, colon).trim()
+        val password = decodedUser.substring(colon + 1).trim()
+        if (method.isEmpty() || password.isEmpty()) return null
+
+        val name = safeDecode(rawName, plusAsSpace = true).trim().ifEmpty { "[SS] $host:$port" }
+
+        return VlessNode(
+            rawUri = trimmed,
+            name = name,
+            uuid = "",
+            host = host,
+            port = port,
+            encryption = "",
+            flow = "",
+            security = "none",
+            network = "tcp",
+            sni = "",
+            fingerprint = "",
+            publicKey = "",
+            shortId = "",
+            spiderX = "",
+            path = "/",
+            headerHost = "",
+            headerType = "",
+            serviceName = "",
+            mode = "",
+            alpn = "",
+            allowInsecure = false,
+            isCurated = isCuratedSource,
+            protocol = "shadowsocks",
+            password = password,
+            method = method
+        )
+    }
+
+    private fun splitHostPort(hostPort: String): Pair<String, Int>? {
+        if (hostPort.isBlank()) return null
+        return if (hostPort.startsWith("[")) {
+            val closeBracket = hostPort.indexOf(']')
+            if (closeBracket <= 1 || closeBracket + 2 > hostPort.length || hostPort[closeBracket + 1] != ':') {
+                return null
+            }
+            val host = hostPort.substring(1, closeBracket)
+            val port = hostPort.substring(closeBracket + 2).toIntOrNull() ?: return null
+            if (host.isBlank() || port !in 1..65535) null else host to port
+        } else {
+            val colonIdx = hostPort.lastIndexOf(':')
+            if (colonIdx <= 0) return null
+            val host = hostPort.substring(0, colonIdx)
+            val port = hostPort.substring(colonIdx + 1).toIntOrNull() ?: return null
+            if (host.isBlank() || port !in 1..65535) null else host to port
+        }
+    }
+
+    private fun parseQueryParams(queryStr: String): HashMap<String, String> {
+        val params = HashMap<String, String>()
+        if (queryStr.isNotEmpty()) {
+            for (pair in queryStr.split('&')) {
+                val eq = pair.indexOf('=')
+                if (eq > 0) {
+                    val k = safeDecode(pair.substring(0, eq), plusAsSpace = false).lowercase()
+                    val v = safeDecode(pair.substring(eq + 1), plusAsSpace = false)
+                    params[k] = v
+                }
+            }
+        }
+        return params
+    }
+
+    private fun decodeBase64Flexible(input: String): String {
+        if (input.isBlank()) return ""
+        return try {
+            String(Base64.decode(input, Base64.DEFAULT), Charsets.UTF_8)
+        } catch (_: Exception) {
+            try {
+                String(Base64.decode(input, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+            } catch (_: Exception) {
+                ""
+            }
+        }
     }
 
     fun buildXrayConfig(
@@ -358,7 +495,7 @@ object VlessParser {
         blockQuic: Boolean = true,
         useLocalDpi: Boolean = false,
         dpiPort: Int = 1081,
-        tgDirect: Boolean = true,
+        tgDirect: Boolean = false,
         isTestMode: Boolean = false
     ): String {
         val root = JSONObject()
@@ -474,11 +611,11 @@ object VlessParser {
         root.put("inbounds", JSONArray().put(inbound))
 
         val outbounds = JSONArray()
-        outbounds.put(buildVlessOutbound(node, "proxy"))
+        outbounds.put(buildProxyOutbound(node, "proxy"))
 
         val hasSeparateMedia = !isTestMode && mediaNode != null && mediaNode.rawUri != node.rawUri
         if (hasSeparateMedia) {
-            outbounds.put(buildVlessOutbound(mediaNode!!, "media-proxy"))
+            outbounds.put(buildProxyOutbound(mediaNode!!, "media-proxy"))
         }
 
         if (!isTestMode && useLocalDpi) {
@@ -653,7 +790,39 @@ object VlessParser {
         return root.toString(2)
     }
 
-    private fun buildVlessOutbound(node: VlessNode, tagName: String): JSONObject {
+    private fun buildProxyOutbound(node: VlessNode, tagName: String): JSONObject {
+        if (node.protocol == "shadowsocks") {
+            val serverObj = JSONObject().apply {
+                put("address", node.host)
+                put("port", node.port)
+                put("method", node.method)
+                put("password", node.password)
+            }
+            return JSONObject().apply {
+                put("tag", tagName)
+                put("protocol", "shadowsocks")
+                put("settings", JSONObject().apply {
+                    put("servers", JSONArray().put(serverObj))
+                })
+            }
+        }
+
+        if (node.protocol == "trojan") {
+            val serverObj = JSONObject().apply {
+                put("address", node.host)
+                put("port", node.port)
+                put("password", node.password)
+            }
+            return JSONObject().apply {
+                put("tag", tagName)
+                put("protocol", "trojan")
+                put("settings", JSONObject().apply {
+                    put("servers", JSONArray().put(serverObj))
+                })
+                put("streamSettings", buildStreamSettings(node))
+            }
+        }
+
         val user = JSONObject().apply {
             put("id", node.uuid)
             put("encryption", node.encryption)
@@ -670,7 +839,18 @@ object VlessParser {
             put("users", JSONArray().put(user))
         }
 
-        val streamSettings = JSONObject().apply {
+        return JSONObject().apply {
+            put("tag", tagName)
+            put("protocol", "vless")
+            put("settings", JSONObject().apply {
+                put("vnext", JSONArray().put(vnextItem))
+            })
+            put("streamSettings", buildStreamSettings(node))
+        }
+    }
+
+    private fun buildStreamSettings(node: VlessNode): JSONObject {
+        return JSONObject().apply {
             put("network", node.network)
             put("security", node.security)
             put("sockopt", JSONObject().apply {
@@ -683,7 +863,7 @@ object VlessParser {
                 "reality" -> {
                     put("realitySettings", JSONObject().apply {
                         put("show", false)
-                        put("fingerprint", node.fingerprint)
+                        put("fingerprint", node.fingerprint.ifBlank { "chrome" })
                         put("serverName", node.sni.ifBlank { node.host })
                         put("publicKey", node.publicKey)
                         put("shortId", node.shortId)
@@ -693,7 +873,7 @@ object VlessParser {
                 "tls" -> {
                     put("tlsSettings", JSONObject().apply {
                         put("serverName", node.sni.ifBlank { node.headerHost.ifBlank { node.host } })
-                        put("fingerprint", node.fingerprint)
+                        put("fingerprint", node.fingerprint.ifBlank { "chrome" })
                         put("allowInsecure", node.allowInsecure)
                         if (node.alpn.isNotBlank()) {
                             val arr = JSONArray()
@@ -751,15 +931,6 @@ object VlessParser {
                     })
                 }
             }
-        }
-
-        return JSONObject().apply {
-            put("tag", tagName)
-            put("protocol", "vless")
-            put("settings", JSONObject().apply {
-                put("vnext", JSONArray().put(vnextItem))
-            })
-            put("streamSettings", streamSettings)
         }
     }
 
