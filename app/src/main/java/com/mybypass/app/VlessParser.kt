@@ -419,8 +419,6 @@ object VlessParser {
                 })
             }
 
-            // ВАЖНО: для DPI_DOMAINS (YouTube/Discord) используем прямой резолв 77.88.8.8, а НЕ FakeDNS,
-            // чтобы LocalDpiProxy получал реальный IPv4-адрес, а не виртуальный 198.18.x.x!
             if (useLocalDpi) {
                 dnsServers.put(JSONObject().apply {
                     put("address", "77.88.8.8")
@@ -561,7 +559,6 @@ object VlessParser {
                 put("outboundTag", "proxy")
             })
 
-            // Локальный DPI-обход для YouTube и Discord (TCP 80/443 идёт через dpi-out, голосовые UDP — через proxy)
             if (useLocalDpi) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
