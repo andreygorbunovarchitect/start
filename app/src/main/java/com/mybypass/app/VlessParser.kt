@@ -51,10 +51,11 @@ object VlessParser {
 
     private val GEO_BLOCKED_FLAGS = listOf("🇷🇺", "🇧🇾", "🇨🇳", "🇭🇰", "🇮🇷", "🇰🇵")
     private val GEO_BLOCKED_WORDS = Regex(
-        "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran)([^a-z]|$)"
+        "(?i)(^|[^a-z])(ru|rus|russia|moscow|spb|by|belarus|cn|china|hk|hong[\\s_-]?kong|iran|aeza|vdsina|firstbyte|timeweb|selectel|reg\\.ru)([^a-z]|$)"
     )
 
-    val ALL_FREE_URLS = listOf(
+    // 8 баз с обходом ТСПУ РФ + 6 зарубежных баз с чистыми европейскими и американскими IP для Google AI
+    val RU_COMPATIBLE_URLS = listOf(
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
@@ -65,12 +66,19 @@ object VlessParser {
         "https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt"
     )
 
+    val FOREIGN_FREE_URLS = listOf(
+        "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+        "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/mix",
+        "https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/vless",
+        "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
+        "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/vless.txt",
+        "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/trojan.txt"
+    )
+
+    val ALL_FREE_URLS = RU_COMPATIBLE_URLS + FOREIGN_FREE_URLS
+
     fun isCuratedUrl(url: String): Boolean {
-        return url.contains("igareck/", ignoreCase = true) ||
-            url.contains("patterniha/", ignoreCase = true) ||
-            url.contains("zieng2/wl/", ignoreCase = true) ||
-            url.contains("aviamastersgh/vpn-free-russia/", ignoreCase = true) ||
-            url.contains("Hidashimora/free-vpn-anti-rkn/", ignoreCase = true)
+        return RU_COMPATIBLE_URLS.any { it.equals(url, ignoreCase = true) }
     }
 
     val YOUTUBE_DOMAINS = listOf(
@@ -442,7 +450,6 @@ object VlessParser {
         val beforeHash = if (hashIdx >= 0) body.substring(0, hashIdx) else body
         val rawName = if (hashIdx >= 0) body.substring(hashIdx + 1) else ""
 
-        // Xray не поддерживает внешние SIP003-плагины
         if (beforeHash.contains("plugin=", ignoreCase = true)) return null
 
         val noQuery = beforeHash.substringBefore('?')
@@ -552,10 +559,6 @@ object VlessParser {
         return if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
     }
 
-    /**
-     * Пакетная конфигурация: один процесс Xray проверяет сразу до 20 узлов
-     * через отдельные локальные SOCKS5-порты (basePort..basePort+N-1).
-     */
     fun buildBatchTestConfig(nodes: List<VlessNode>, basePort: Int): String {
         val root = JSONObject()
         root.put("log", JSONObject().apply { put("loglevel", "error") })
@@ -588,7 +591,7 @@ object VlessParser {
                     put("ip", "127.0.0.1")
                 })
             })
-            outbounds.put(buildProxyOutbound(node, outTag))
+            outbounds.put(buildProxyOutbound(node, outTag, enableMux = false))
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put(inTag))
@@ -606,9 +609,17 @@ object VlessParser {
         return root.toString()
     }
 
+    /**
+     * Многопоточная конфигурация Xray:
+     * Поток 1 (proxy): ИИ (Gemini/ChatGPT/Claude), Meta, Discord, западные сайты
+     * Поток 2 (media-proxy или dpi-out): YouTube (видео 1080p/4K не грузит канал ИИ)
+     * Поток 3 (tg-proxy или direct): Telegram (отдельный поток для мессенджера)
+     * Поток 4 (direct): РФ (.ru/.рф), банки, Госуслуги, Яндекс, VK
+     */
     fun buildXrayConfig(
         node: VlessNode,
         mediaNode: VlessNode? = null,
+        tgNode: VlessNode? = null,
         socksPort: Int = 1080,
         smartBypass: Boolean = true,
         splitRu: Boolean = true,
@@ -648,17 +659,13 @@ object VlessParser {
             }))
 
             val dnsServers = JSONArray()
-            if (!isIpAddress(node.host)) {
+            val proxyHosts = listOfNotNull(node.host, mediaNode?.host, tgNode?.host)
+                .filter { !isIpAddress(it) }
+                .distinct()
+            for (h in proxyHosts) {
                 dnsServers.put(JSONObject().apply {
                     put("address", "77.88.8.8")
-                    put("domains", JSONArray().put("full:${node.host}"))
-                    put("skipFallback", true)
-                })
-            }
-            if (mediaNode != null && mediaNode.host != node.host && !isIpAddress(mediaNode.host)) {
-                dnsServers.put(JSONObject().apply {
-                    put("address", "77.88.8.8")
-                    put("domains", JSONArray().put("full:${mediaNode.host}"))
+                    put("domains", JSONArray().put("full:$h"))
                     put("skipFallback", true)
                 })
             }
@@ -680,7 +687,6 @@ object VlessParser {
             }
 
             if (smartBypass) {
-                // google.ru всегда через FakeDNS, остальные .ru — через 77.88.8.8
                 dnsServers.put(JSONObject().apply {
                     put("address", "fakedns")
                     put("domains", JSONArray().put("domain:google.ru"))
@@ -744,11 +750,18 @@ object VlessParser {
         root.put("inbounds", JSONArray().put(inbound))
 
         val outbounds = JSONArray()
-        outbounds.put(buildProxyOutbound(node, "proxy"))
+        outbounds.put(buildProxyOutbound(node, "proxy", enableMux = !isTestMode))
 
         val hasSeparateMedia = !isTestMode && mediaNode != null && mediaNode.rawUri != node.rawUri
         if (hasSeparateMedia) {
-            outbounds.put(buildProxyOutbound(mediaNode!!, "media-proxy"))
+            outbounds.put(buildProxyOutbound(mediaNode!!, "media-proxy", enableMux = true))
+        }
+
+        val hasSeparateTg = !isTestMode && tgNode != null &&
+            tgNode.rawUri != node.rawUri &&
+            tgNode.rawUri != mediaNode?.rawUri
+        if (hasSeparateTg) {
+            outbounds.put(buildProxyOutbound(tgNode!!, "tg-proxy", enableMux = true))
         }
 
         if (!isTestMode && useLocalDpi) {
@@ -777,7 +790,6 @@ object VlessParser {
 
         val rules = JSONArray()
         if (!isTestMode) {
-            // 1. Внутренний DNS (порт 53)
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -785,7 +797,6 @@ object VlessParser {
                 put("outboundTag", "dns-out")
             })
 
-            // 2. Блокируем Private DNS (DoT, порт 853), чтобы Android/Pixel не обходил VPN-DNS
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("inboundTag", JSONArray().put("socks-in"))
@@ -793,14 +804,12 @@ object VlessParser {
                 put("outboundTag", "block")
             })
 
-            // 3. Прямой DNS провайдера/Яндекса
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("77.88.8.8/32").put("77.88.8.1/32"))
                 put("outboundTag", "direct")
             })
 
-            // 4. DoH 1.1.1.1 / 8.8.8.8 через основной прокси
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("1.1.1.1/32").put("8.8.8.8/32"))
@@ -808,7 +817,6 @@ object VlessParser {
                 put("outboundTag", "proxy")
             })
 
-            // 5. Блокируем QUIC только для Google и YouTube
             if (blockQuic) {
                 rules.put(JSONObject().apply {
                     put("type", "field")
@@ -819,7 +827,6 @@ object VlessParser {
                 })
             }
 
-            // 6. Локальные сети напрямую
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().apply {
@@ -831,7 +838,7 @@ object VlessParser {
                 put("outboundTag", "direct")
             })
 
-            // 7. Канал YouTube
+            // Поток 2: YouTube -> Локальный DPI или выделенный media-proxy
             val ytTag = when {
                 useLocalDpi -> "dpi-out"
                 hasSeparateMedia -> "media-proxy"
@@ -843,9 +850,10 @@ object VlessParser {
                 put("outboundTag", ytTag)
             })
 
-            // 8. Канал Telegram
+            // Поток 3: Telegram -> Direct или выделенный tg-proxy / media-proxy
             val tgTag = when {
                 tgDirect -> "direct"
+                hasSeparateTg -> "tg-proxy"
                 hasSeparateMedia -> "media-proxy"
                 else -> "proxy"
             }
@@ -860,14 +868,13 @@ object VlessParser {
                 put("outboundTag", tgTag)
             })
 
-            // 9. Канал ИИ + Meta + Discord
+            // Поток 1: ИИ (Gemini/ChatGPT/Claude), Meta, Discord -> основной proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("domain", JSONArray(AI_AND_SOCIAL_DOMAINS))
                 put("outboundTag", "proxy")
             })
 
-            // 10. Остальной FakeDNS-пул (198.18.0.0/15) всегда в proxy
             rules.put(JSONObject().apply {
                 put("type", "field")
                 put("ip", JSONArray().put("198.18.0.0/15"))
@@ -947,7 +954,17 @@ object VlessParser {
         }
     }
 
-    private fun buildProxyOutbound(node: VlessNode, tagName: String): JSONObject {
+    private fun buildProxyOutbound(node: VlessNode, tagName: String, enableMux: Boolean): JSONObject {
+        // Mux ускоряет параллельные запросы браузера и Gemini (не включается для xtls-rprx-vision, grpc и xhttp)
+        val canMux = enableMux &&
+            node.flow.isBlank() &&
+            node.network in setOf("tcp", "ws", "httpupgrade")
+
+        val muxObj = JSONObject().apply {
+            put("enabled", canMux)
+            if (canMux) put("concurrency", 8)
+        }
+
         if (node.protocol == "shadowsocks") {
             val serverObj = JSONObject().apply {
                 put("address", node.host)
@@ -961,6 +978,7 @@ object VlessParser {
                 put("settings", JSONObject().apply {
                     put("servers", JSONArray().put(serverObj))
                 })
+                put("mux", muxObj)
             }
         }
 
@@ -977,6 +995,7 @@ object VlessParser {
                     put("servers", JSONArray().put(serverObj))
                 })
                 put("streamSettings", buildStreamSettings(node))
+                put("mux", muxObj)
             }
         }
 
@@ -1003,6 +1022,7 @@ object VlessParser {
                 put("vnext", JSONArray().put(vnextItem))
             })
             put("streamSettings", buildStreamSettings(node))
+            put("mux", muxObj)
         }
     }
 
