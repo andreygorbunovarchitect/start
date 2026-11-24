@@ -621,7 +621,7 @@ object VlessParser {
         val root = JSONObject()
 
         root.put("log", JSONObject().apply {
-            put("loglevel", if (isTestMode) "error" else "warning")
+            put("loglevel", "error")
         })
 
         if (isTestMode) {
@@ -637,6 +637,7 @@ object VlessParser {
                         put("connIdle", 300)
                         put("uplinkOnly", 2)
                         put("downlinkOnly", 5)
+                        put("bufferSize", 512)
                     })
                 })
             })
