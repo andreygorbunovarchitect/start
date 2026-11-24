@@ -69,7 +69,7 @@ data class TestedNode(
         if (metaOk) tags.add("Meta")
         if (tgOk) tags.add("TG")
         if (waOk) tags.add("WA")
-        return if (tags.isEmpty()) "(Резерв)" else "(${tags.joinToString(", ")})"
+        return if (tags.isEmpty()) "(Базовый)" else "(${tags.joinToString(", ")})"
     }
 
     fun shortTitle(): String {
@@ -427,21 +427,17 @@ object ServerScanner {
             }
 
             if (verified.isEmpty()) {
-                val tcpFallback = if (fallbackLive.isNotEmpty()) {
-                    fallbackLive.sortedBy { it.pingMs }.take(5)
-                } else {
-                    tcpAlive.take(5).map { (n, p) -> TestedNode(node = n, pingMs = p) }
-                }
-                if (tcpFallback.isNotEmpty()) {
-                    saveWorkingList(context, tcpFallback)
-                    saveSelectedNode(context, tcpFallback[0])
+                if (fallbackLive.isNotEmpty()) {
+                    val sortedFallback = fallbackLive.sortedBy { it.pingMs }.take(5)
+                    saveWorkingList(context, sortedFallback)
+                    saveSelectedNode(context, sortedFallback[0])
                     BypassVpnService.log(
-                        "HTTPS-проверка не прошла по таймауту, сохранено ${tcpFallback.size} живых по TCP узлов. " +
-                            "Лучший: ${tcpFallback[0].shortTitle()} • ${tcpFallback[0].pingMs}мс"
+                        "Найдено ${sortedFallback.size} узлов с ответом по HTTPS (без подтверждённого Gemini). " +
+                            "Лучший: ${sortedFallback[0].shortTitle()} • ${sortedFallback[0].pingMs}мс"
                     )
-                    return tcpFallback
+                    return sortedFallback
                 }
-                BypassVpnService.log("Рабочих серверов не найдено. Нажмите поиск ещё раз.")
+                BypassVpnService.log("Ни один узел из баз не прошёл проверку. Нажмите «Автопоиск» повторно или проверьте сеть.")
                 firstDiagErr.get()?.let { err ->
                     BypassVpnService.log("Диагностика теста: $err")
                 }
